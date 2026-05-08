@@ -1,3 +1,4 @@
+[CmdletBinding(PositionalBinding = $false)]
 param(
     [ValidateSet("VisualStudio", "Ninja")]
     [string]$Generator = "VisualStudio",
@@ -16,6 +17,57 @@ param(
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
+
+function Get-VsWherePath {
+    $candidates = @()
+    if (${env:ProgramFiles(x86)}) {
+        $candidates += (Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe")
+    }
+    if ($env:ProgramFiles) {
+        $candidates += (Join-Path $env:ProgramFiles "Microsoft Visual Studio\Installer\vswhere.exe")
+    }
+
+    foreach ($candidate in $candidates) {
+        if (Test-Path $candidate) {
+            return $candidate
+        }
+    }
+    return $null
+}
+
+function Get-VsDevCmdPath {
+    $vswhere = Get-VsWherePath
+    if (-not $vswhere) {
+        throw "vswhere.exe not found. Install Visual Studio 2022 with C++ tools."
+    }
+
+    $installPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+    if (-not $installPath) {
+        throw "No Visual Studio installation with MSVC tools was found."
+    }
+
+    $installPath = ($installPath | Select-Object -First 1).Trim()
+    $vsDevCmd = Join-Path $installPath "Common7\Tools\VsDevCmd.bat"
+    if (-not (Test-Path $vsDevCmd)) {
+        throw "VsDevCmd.bat not found at: $vsDevCmd"
+    }
+
+    return $vsDevCmd
+}
+
+function Invoke-InVsDevCmd {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$CommandLine
+    )
+
+    $vsDevCmd = Get-VsDevCmdPath
+    $wrapped = "`"$vsDevCmd`" -arch=x64 -host_arch=x64 && $CommandLine"
+    cmd.exe /c $wrapped
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+}
 
 # Support Linux-style flag usage: --ninja
 if ($RemainingArgs -and $RemainingArgs.Count -gt 0) {
@@ -57,9 +109,21 @@ if ($Clean -and (Test-Path $ninjaBuildDir)) {
 }
 
 Write-Host "Configuring (Ninja): $ninjaBuildDir"
-cmake -S $repoRoot -B $ninjaBuildDir -G Ninja -DCMAKE_BUILD_TYPE=$Config
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$configureCmd = "cmake -S `"$repoRoot`" -B `"$ninjaBuildDir`" -G Ninja -DCMAKE_BUILD_TYPE=$Config"
+$buildCmd = "cmake --build `"$ninjaBuildDir`""
 
+$clAvailable = $null -ne (Get-Command cl.exe -ErrorAction SilentlyContinue)
+if ($clAvailable) {
+    cmake -S $repoRoot -B $ninjaBuildDir -G Ninja -DCMAKE_BUILD_TYPE=$Config
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    Write-Host "Building ($Config): $ninjaBuildDir"
+    cmake --build $ninjaBuildDir
+    exit $LASTEXITCODE
+}
+
+Write-Host "MSVC not found in this shell. Bootstrapping VS DevCmd."
+Invoke-InVsDevCmd -CommandLine $configureCmd
 Write-Host "Building ($Config): $ninjaBuildDir"
-cmake --build $ninjaBuildDir
+Invoke-InVsDevCmd -CommandLine $buildCmd
 exit $LASTEXITCODE
