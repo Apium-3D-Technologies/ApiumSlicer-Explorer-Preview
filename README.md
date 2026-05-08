@@ -39,3 +39,9 @@ _**Output:** `build-ninja/ApiumSlicerExplorerPreview.dll`_
 Examples:
 - Visual Studio build: `powershell -ExecutionPolicy Bypass -File .\scripts\build.ps1`
 - Ninja build (flag): `powershell -ExecutionPolicy Bypass -File .\scripts\build.ps1 --ninja`
+
+## License
+This project is licensed under the GNU General Public License v3.0
+(GPLv3).
+
+See the full license text in [LICENSE](LICENSE).
