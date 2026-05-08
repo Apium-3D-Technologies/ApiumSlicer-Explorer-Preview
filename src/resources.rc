@@ -1,0 +1,4 @@
+#include <windows.h>
+#include "resource.hpp"
+
+IDR_FALLBACK_PNG PNG "..\\resources\\fallback.png"
