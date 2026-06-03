@@ -2,6 +2,7 @@
 
 !doc/resource/*.png
 !resources/*.png
+!resources/*.propdesc
 !CMakeLists.txt
 !.gitattributes
 !scripts/*.ps1
@@ -9,12 +10,17 @@
 !resources/
 !.gitignore
 !README.md
+!NOTICES.md
 !src/*.cpp
 !src/*.hpp
 !src/*.def
 !src/*.rc
 !doc/*.md
 !scripts/
+!deps/
+!deps/miniz/
+!deps/miniz/*.c
+!deps/miniz/*.h
 !LICENSE
 !src/
 !doc/

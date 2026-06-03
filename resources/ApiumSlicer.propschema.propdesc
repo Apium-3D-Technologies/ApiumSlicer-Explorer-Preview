@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<schema xmlns="http://schemas.microsoft.com/windows/2006/propertydescription" schemaVersion="1.0">
+  <propertyDescriptionList publisher="Apium" product="ApiumSlicerExplorerPreview">
+    <propertyDescription name="Apium.ApiumSlicer.Printer" formatID="{A19E4D20-CA76-47BD-B369-98EC0A8A6A30}" propID="2">
+      <searchInfo inInvertedIndex="false"/>
+      <labelInfo label="Printer"/>
+      <typeInfo type="String"/>
+    </propertyDescription>
+    <propertyDescription name="Apium.ApiumSlicer.ProjectVersion" formatID="{A19E4D20-CA76-47BD-B369-98EC0A8A6A30}" propID="3">
+      <searchInfo inInvertedIndex="false"/>
+      <labelInfo label="Project Version"/>
+      <typeInfo type="String"/>
+    </propertyDescription>
+    <propertyDescription name="Apium.ApiumSlicer.MaterialType" formatID="{A19E4D20-CA76-47BD-B369-98EC0A8A6A30}" propID="4">
+      <searchInfo inInvertedIndex="false"/>
+      <labelInfo label="Material Type"/>
+      <typeInfo type="String"/>
+    </propertyDescription>
+    <propertyDescription name="Apium.ApiumSlicer.NozzleDiameter" formatID="{A19E4D20-CA76-47BD-B369-98EC0A8A6A30}" propID="5">
+      <searchInfo inInvertedIndex="false"/>
+      <labelInfo label="Nozzle Diameter"/>
+      <typeInfo type="String"/>
+    </propertyDescription>
+    <propertyDescription name="Apium.ApiumSlicer.NozzleTemperature" formatID="{A19E4D20-CA76-47BD-B369-98EC0A8A6A30}" propID="6">
+      <searchInfo inInvertedIndex="false"/>
+      <labelInfo label="Nozzle Temperature"/>
+      <typeInfo type="String"/>
+    </propertyDescription>
+    <propertyDescription name="Apium.ApiumSlicer.BedTemperature" formatID="{A19E4D20-CA76-47BD-B369-98EC0A8A6A30}" propID="7">
+      <searchInfo inInvertedIndex="false"/>
+      <labelInfo label="Bed Temperature"/>
+      <typeInfo type="String"/>
+    </propertyDescription>
+    <propertyDescription name="Apium.ApiumSlicer.LayerHeight" formatID="{A19E4D20-CA76-47BD-B369-98EC0A8A6A30}" propID="8">
+      <searchInfo inInvertedIndex="false"/>
+      <labelInfo label="Layer Height"/>
+      <typeInfo type="String"/>
+    </propertyDescription>
+    <propertyDescription name="Apium.ApiumSlicer.Perimeters" formatID="{A19E4D20-CA76-47BD-B369-98EC0A8A6A30}" propID="9">
+      <searchInfo inInvertedIndex="false"/>
+      <labelInfo label="Perimeters"/>
+      <typeInfo type="String"/>
+    </propertyDescription>
+    <propertyDescription name="Apium.ApiumSlicer.InfillPattern" formatID="{A19E4D20-CA76-47BD-B369-98EC0A8A6A30}" propID="10">
+      <searchInfo inInvertedIndex="false"/>
+      <labelInfo label="Infill Pattern"/>
+      <typeInfo type="String"/>
+    </propertyDescription>
+    <propertyDescription name="Apium.ApiumSlicer.InfillDensity" formatID="{A19E4D20-CA76-47BD-B369-98EC0A8A6A30}" propID="11">
+      <searchInfo inInvertedIndex="false"/>
+      <labelInfo label="Infill Density"/>
+      <typeInfo type="String"/>
+    </propertyDescription>
+    <propertyDescription name="Apium.ApiumSlicer.PrintTime" formatID="{A19E4D20-CA76-47BD-B369-98EC0A8A6A30}" propID="12">
+      <searchInfo inInvertedIndex="false"/>
+      <labelInfo label="Print Time"/>
+      <typeInfo type="String"/>
+    </propertyDescription>
+  </propertyDescriptionList>
+</schema>
