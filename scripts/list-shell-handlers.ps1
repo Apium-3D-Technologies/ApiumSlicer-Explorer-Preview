@@ -1,5 +1,5 @@
 param(
-    [string[]]$Extensions = @(".gcode", ".a3d")
+    [string[]]$Extensions = @(".gcode", ".a3d", ".stl", ".obj")
 )
 
 $ErrorActionPreference = "Stop"
@@ -9,6 +9,7 @@ $thumbnailIid = "{E357FCCD-A995-4576-B01F-234630154E96}"
 $apiumPreviewClsid = "{B450D582-1E34-49E0-8AE7-AFF2D2CD2535}"
 $apiumThumbnailClsid = "{8A14EAA2-3FDB-4C5A-98A1-5D0A8700C8A5}"
 $apiumPropertyClsid = "{12D795E2-813D-4E87-93BB-DC5E6239BB42}"
+$propertyExtensions = @(".gcode", ".a3d")
 
 function Normalize-Extension {
     param([string]$Extension)
@@ -32,6 +33,16 @@ function Get-RegDefaultValue {
 function Get-UserChoiceProgId {
     param([string]$Extension)
     $path = "Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\$Extension\UserChoice"
+    try {
+        return (Get-ItemProperty -Path $path -ErrorAction Stop).ProgId
+    } catch {
+        return $null
+    }
+}
+
+function Get-UserChoiceLatestProgId {
+    param([string]$Extension)
+    $path = "Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\$Extension\UserChoiceLatest\ProgId"
     try {
         return (Get-ItemProperty -Path $path -ErrorAction Stop).ProgId
     } catch {
@@ -100,12 +111,16 @@ function Resolve-EffectiveHandler {
     $subkey = Get-HandlerSubkeyName -HandlerType $HandlerType
     $progId = Get-RegDefaultValue -Path "Registry::HKEY_CLASSES_ROOT\$Extension"
     $userChoiceProgId = Get-UserChoiceProgId -Extension $Extension
+    $userChoiceLatestProgId = Get-UserChoiceLatestProgId -Extension $Extension
 
     $candidatePaths = @(
         "Registry::HKEY_CLASSES_ROOT\$Extension\shellex\$subkey"
     )
     if ($userChoiceProgId) {
         $candidatePaths = @("Registry::HKEY_CLASSES_ROOT\$userChoiceProgId\shellex\$subkey") + $candidatePaths
+    }
+    if ($userChoiceLatestProgId) {
+        $candidatePaths = @("Registry::HKEY_CLASSES_ROOT\$userChoiceLatestProgId\shellex\$subkey") + $candidatePaths
     }
     if ($progId) {
         $candidatePaths += "Registry::HKEY_CLASSES_ROOT\$progId\shellex\$subkey"
@@ -213,10 +228,14 @@ Write-Host ""
 Write-Host "UserChoice ProgID (HKCU FileExts):"
 foreach ($ext in $normalizedExtensions) {
     $uc = Get-UserChoiceProgId -Extension $ext
+    $ucl = Get-UserChoiceLatestProgId -Extension $ext
     if ($uc) {
         Write-Host (" - {0}: {1}" -f $ext, $uc)
     } else {
         Write-Host (" - {0}: (none)" -f $ext)
+    }
+    if ($ucl) {
+        Write-Host ("   UserChoiceLatest: {0}" -f $ucl)
     }
 }
 Write-Host ""
@@ -251,6 +270,12 @@ $warnings = @()
 foreach ($row in $effective) {
     if ($row.Extension -in $criticalExts) {
         $expected = $expectedByType[$row.HandlerType]
+        if ($row.HandlerType -eq "PropertyHandler" -and $row.Extension -notin $propertyExtensions) {
+            if ($row.Clsid -and $row.Clsid.ToLowerInvariant() -eq $apiumPropertyClsid.ToLowerInvariant()) {
+                $warnings += "$($row.Extension) unexpectedly has the Apium PropertyHandler."
+            }
+            continue
+        }
         if (-not $row.Clsid) {
             $warnings += "No effective $($row.HandlerType) found for $($row.Extension)."
         } elseif ($row.Clsid.ToLowerInvariant() -ne $expected.ToLowerInvariant()) {

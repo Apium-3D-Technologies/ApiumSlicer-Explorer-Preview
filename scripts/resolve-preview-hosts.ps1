@@ -113,8 +113,22 @@ function Print-Snapshot {
     Write-Host ("Snapshot: {0}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"))
     Write-Host ""
 
-    $hosts = Get-CimInstance Win32_Process -Filter "Name='prevhost.exe' OR Name='dllhost.exe' OR Name='explorer.exe'" |
-        Select-Object Name, ProcessId, CommandLine
+    $hosts = @()
+    try {
+        $hosts = Get-CimInstance Win32_Process -Filter "Name='prevhost.exe' OR Name='dllhost.exe' OR Name='explorer.exe'" |
+            Select-Object Name, ProcessId, CommandLine
+    } catch {
+        Write-Warning ("Could not query process command lines via CIM: {0}" -f $_.Exception.Message)
+        Write-Warning "Falling back to process list only. Run elevated for PreviewHost CLSID command lines."
+        $hosts = Get-Process explorer,prevhost,dllhost -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                [pscustomobject]@{
+                    Name        = $_.ProcessName + ".exe"
+                    ProcessId   = $_.Id
+                    CommandLine = ""
+                }
+            }
+    }
 
     if (-not $hosts) {
         Write-Host "No preview-relevant host processes found."

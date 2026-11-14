@@ -42,6 +42,7 @@ _**Output:** `build-ninja/ApiumSlicerExplorerPreview.dll`_
 - Register (per-user via `DllRegisterServer`, Apium ProgID, Default Apps capabilities, and shell handlers): `scripts/register.ps1`
 - Unregister (default with Explorer cache clear): `scripts/unregister.ps1`
 - Shell handler diagnostics: `scripts/list-shell-handlers.ps1`
+- Preview routing diagnostics: `scripts/inspect-preview-routing.ps1`
 - Register property schema (admin, optional): `scripts/register-properties-admin.ps1`
 - Unregister property schema (admin, optional): `scripts/unregister-properties-admin.ps1`
 
