@@ -25,6 +25,7 @@
 #include <type_traits>
 #include <vector>
 
+#include "mesh_preview.hpp"
 #include "metadata.hpp"
 #include "generated/apium_version.h"
 
@@ -36,6 +37,7 @@ constexpr std::wstring_view kThumbnailProviderIidString = L"{E357FCCD-A995-4576-
 constexpr std::wstring_view kPreviewHandlerIidString = L"{8895B1C6-B41F-4C1C-A562-0D564250836F}";
 constexpr std::wstring_view kPreviewHostAppId = L"{3B0FE91D-45E1-41E4-A6A7-6F8045AEF35A}";
 constexpr wchar_t kPreviewPaneWindowClassName[] = L"ApiumSlicerPreviewPaneWindow";
+constexpr wchar_t kPreviewImageWindowClassName[] = L"ApiumSlicerPreviewImageWindow";
 
 // {8A14EAA2-3FDB-4C5A-98A1-5D0A8700C8A5}
 const CLSID CLSID_ApiumSlicerThumbnailProvider = {
@@ -468,6 +470,18 @@ void TryUnregisterPropertySchema() {
     (void)DeleteFileW(schemaPath.c_str());
 }
 
+bool GetBitmapSize(HBITMAP bitmap, int& width, int& height) {
+    BITMAP bmpInfo = {};
+    if (!bitmap || GetObjectW(bitmap, sizeof(bmpInfo), &bmpInfo) != sizeof(bmpInfo)) {
+        width = 0;
+        height = 0;
+        return false;
+    }
+    width = std::max(1L, bmpInfo.bmWidth);
+    height = std::max(1L, bmpInfo.bmHeight);
+    return true;
+}
+
 std::wstring AppendUnit(std::wstring value, std::wstring_view unit) {
     if (value.empty()) {
         return value;
@@ -569,6 +583,109 @@ std::vector<PreviewRow> BuildPreviewRows(const ApiumMetadata& metadata) {
     if (!metadata.printTime.empty()) {
         addLine(L"Print Time", metadata.printTime);
     }
+    return rows;
+}
+
+std::wstring FileNameFromPath(std::wstring_view path) {
+    if (path.empty()) {
+        return L"<stream>";
+    }
+    const size_t slashPos = path.find_last_of(L"\\/");
+    if (slashPos == std::wstring_view::npos) {
+        return std::wstring(path);
+    }
+    return std::wstring(path.substr(slashPos + 1));
+}
+
+std::wstring FormatInteger(size_t value) {
+    return std::to_wstring(static_cast<unsigned long long>(value));
+}
+
+std::wstring FormatFileSize(size_t bytes) {
+    wchar_t buffer[64] = {};
+    constexpr double kKiB = 1024.0;
+    constexpr double kMiB = 1024.0 * 1024.0;
+    constexpr double kGiB = 1024.0 * 1024.0 * 1024.0;
+    if (bytes >= static_cast<size_t>(kGiB)) {
+        (void)StringCchPrintfW(buffer, std::size(buffer), L"%.2f GB", static_cast<double>(bytes) / kGiB);
+    } else if (bytes >= static_cast<size_t>(kMiB)) {
+        (void)StringCchPrintfW(buffer, std::size(buffer), L"%.2f MB", static_cast<double>(bytes) / kMiB);
+    } else if (bytes >= static_cast<size_t>(kKiB)) {
+        (void)StringCchPrintfW(buffer, std::size(buffer), L"%.2f KB", static_cast<double>(bytes) / kKiB);
+    } else {
+        (void)StringCchPrintfW(buffer, std::size(buffer), L"%llu B", static_cast<unsigned long long>(bytes));
+    }
+    return buffer;
+}
+
+std::wstring FormatModelNumber(double value) {
+    wchar_t buffer[64] = {};
+    (void)StringCchPrintfW(buffer, std::size(buffer), L"%.3f", value);
+    std::wstring text(buffer);
+    while (text.find(L'.') != std::wstring::npos && !text.empty() && text.back() == L'0') {
+        text.pop_back();
+    }
+    if (!text.empty() && text.back() == L'.') {
+        text.pop_back();
+    }
+    return text.empty() ? L"0" : text;
+}
+
+std::wstring FormatDimensions(const MeshPreviewResult& meshInfo) {
+    if (!meshInfo.hasDimensions) {
+        return L"n/a";
+    }
+    return FormatModelNumber(meshInfo.dimensionX) + L" x " +
+           FormatModelNumber(meshInfo.dimensionY) + L" x " +
+           FormatModelNumber(meshInfo.dimensionZ) + L" model units";
+}
+
+std::wstring FormatLastWriteTime(std::wstring_view path) {
+    if (path.empty()) {
+        return L"n/a";
+    }
+
+    WIN32_FILE_ATTRIBUTE_DATA attributes = {};
+    if (!GetFileAttributesExW(std::wstring(path).c_str(), GetFileExInfoStandard, &attributes)) {
+        return L"n/a";
+    }
+
+    FILETIME localFileTime = {};
+    SYSTEMTIME localTime = {};
+    if (!FileTimeToLocalFileTime(&attributes.ftLastWriteTime, &localFileTime) ||
+        !FileTimeToSystemTime(&localFileTime, &localTime)) {
+        return L"n/a";
+    }
+
+    wchar_t dateBuffer[64] = {};
+    wchar_t timeBuffer[64] = {};
+    if (GetDateFormatW(LOCALE_USER_DEFAULT, DATE_SHORTDATE, &localTime, nullptr, dateBuffer, static_cast<int>(std::size(dateBuffer))) == 0 ||
+        GetTimeFormatW(LOCALE_USER_DEFAULT, TIME_NOSECONDS, &localTime, nullptr, timeBuffer, static_cast<int>(std::size(timeBuffer))) == 0) {
+        return L"n/a";
+    }
+
+    return std::wstring(dateBuffer) + L" " + timeBuffer;
+}
+
+std::vector<PreviewRow> BuildMeshPreviewRows(
+    const MeshPreviewResult& meshInfo,
+    std::wstring_view sourceFilePath,
+    size_t fileSizeBytes) {
+    std::vector<PreviewRow> rows;
+    auto addLine = [&](std::wstring_view label, std::wstring value) {
+        if (!value.empty()) {
+            rows.push_back(PreviewRow{std::wstring(label), std::move(value)});
+        }
+    };
+
+    addLine(L"Filename", FileNameFromPath(sourceFilePath));
+    addLine(L"Format", meshInfo.format.empty() ? L"n/a" : meshInfo.format);
+    addLine(L"Polygons", FormatInteger(meshInfo.polygons));
+    addLine(L"Faces", FormatInteger(meshInfo.faces));
+    addLine(L"Vertices", FormatInteger(meshInfo.vertices));
+    addLine(L"Dimensions", FormatDimensions(meshInfo));
+    addLine(L"Filesize", FormatFileSize(fileSizeBytes));
+    addLine(L"Last Change", FormatLastWriteTime(sourceFilePath));
     return rows;
 }
 
@@ -1020,9 +1137,11 @@ public:
             DebugLogWin(L"ThumbnailProvider Initialize(IStream): ReadPreviewStream failed");
             fileBytes_.clear();
             metadata_ = ApiumMetadata{};
+            sourceFilePath_.clear();
             initialized_ = true;
             return S_OK;
         }
+        sourceFilePath_.clear();
         initialized_ = true;
         DebugLogWin(
             L"ThumbnailProvider Initialize(IStream): success, container=" + metadata_.diagnostics.container +
@@ -1037,6 +1156,7 @@ public:
         if (!filePath) {
             return E_INVALIDARG;
         }
+        sourceFilePath_ = filePath;
         if (!ReadPreviewFile(filePath, fileBytes_, metadata_)) {
             DebugLogWin(L"ThumbnailProvider Initialize(IFile): ReadPreviewFile failed");
             fileBytes_.clear();
@@ -1071,6 +1191,7 @@ public:
 
         std::wstring path(filePath);
         CoTaskMemFree(filePath);
+        sourceFilePath_ = path;
         if (!ReadPreviewFile(path.c_str(), fileBytes_, metadata_)) {
             DebugLogWin(L"ThumbnailProvider Initialize(IShellItem): ReadPreviewFile failed for " + path);
             fileBytes_.clear();
@@ -1091,6 +1212,25 @@ public:
         *pdwAlpha = WTSAT_UNKNOWN;
         if (!initialized_) {
             return E_UNEXPECTED;
+        }
+
+        HBITMAP meshBitmap = nullptr;
+        MeshPreviewResult meshResult = RenderMeshPreviewToHBitmap(fileBytes_, sourceFilePath_, cx, &meshBitmap);
+        if (meshResult.rendered && meshBitmap) {
+            DebugLogWin(
+                L"ThumbnailProvider GetThumbnail: mesh rendered, format=" + meshResult.format +
+                L", triangles=" + std::to_wstring(meshResult.triangles));
+            *phbmp = meshBitmap;
+            *pdwAlpha = WTSAT_ARGB;
+            return S_OK;
+        }
+        if (meshResult.isMesh || IsMeshPreviewExtension(sourceFilePath_)) {
+            DebugLogWin(
+                L"ThumbnailProvider GetThumbnail: mesh render unavailable, status=" + meshResult.status +
+                L", hint=" + (sourceFilePath_.empty() ? std::wstring(L"<stream>") : sourceFilePath_));
+            if (IsMeshPreviewExtension(sourceFilePath_)) {
+                return E_FAIL;
+            }
         }
 
         std::vector<uint8_t> pngBytes = metadata_.thumbnailBytes;
@@ -1116,6 +1256,7 @@ private:
     LONG refCount_ = 1;
     bool initialized_ = false;
     std::vector<uint8_t> fileBytes_;
+    std::wstring sourceFilePath_;
     ApiumMetadata metadata_;
 };
 
@@ -1253,11 +1394,14 @@ public:
 
         initPath_ = L"IShellItem";
         sourceFilePath_ = std::move(path);
+        knownMeshFile_ = IsMeshPreviewExtension(sourceFilePath_);
+        meshInfo_ = knownMeshFile_ ? AnalyzeMeshPreview(fileBytes_, sourceFilePath_) : MeshPreviewResult{};
         initialized_ = true;
         DebugLogWin(
             L"PreviewHandler Initialize(IShellItem): host=" + hostProcessName_ +
             L", container=" + metadata_.diagnostics.container +
-            L", isApium=" + std::wstring(metadata_.isApium ? L"true" : L"false"));
+            L", isApium=" + std::wstring(metadata_.isApium ? L"true" : L"false") +
+            L", meshCandidate=" + std::wstring(knownMeshFile_ ? L"true" : L"false"));
         return S_OK;
     }
 
@@ -1292,11 +1436,14 @@ public:
         }
         initPath_ = L"IStream";
         sourceFilePath_.clear();
+        meshInfo_ = AnalyzeMeshPreview(fileBytes_, L"");
+        knownMeshFile_ = meshInfo_.isMesh;
         initialized_ = true;
         DebugLogWin(
             L"PreviewHandler Initialize(IStream): host=" + hostProcessName_ +
             L", container=" + metadata_.diagnostics.container +
-            L", isApium=" + std::wstring(metadata_.isApium ? L"true" : L"false"));
+            L", isApium=" + std::wstring(metadata_.isApium ? L"true" : L"false") +
+            L", meshCandidate=" + std::wstring(knownMeshFile_ ? L"true" : L"false"));
         return S_OK;
     }
 
@@ -1319,11 +1466,14 @@ public:
         }
         initPath_ = L"IFile";
         sourceFilePath_ = filePath;
+        knownMeshFile_ = IsMeshPreviewExtension(sourceFilePath_);
+        meshInfo_ = knownMeshFile_ ? AnalyzeMeshPreview(fileBytes_, sourceFilePath_) : MeshPreviewResult{};
         initialized_ = true;
         DebugLogWin(
             L"PreviewHandler Initialize(IFile): host=" + hostProcessName_ +
             L", container=" + metadata_.diagnostics.container +
-            L", isApium=" + std::wstring(metadata_.isApium ? L"true" : L"false"));
+            L", isApium=" + std::wstring(metadata_.isApium ? L"true" : L"false") +
+            L", meshCandidate=" + std::wstring(knownMeshFile_ ? L"true" : L"false"));
         return S_OK;
     }
 
@@ -1367,7 +1517,8 @@ public:
             L", initPath=" + initPath_ +
             L", file=" + fileHint +
             L", isApium=" + std::wstring(metadata_.isApium ? L"true" : L"false") +
-            L", container=" + metadata_.diagnostics.container);
+            L", container=" + metadata_.diagnostics.container +
+            L", meshCandidate=" + std::wstring(knownMeshFile_ ? L"true" : L"false"));
         if (hwndPreview_) {
             Layout();
             ShowWindow(hwndPreview_, SW_SHOWNA);
@@ -1377,6 +1528,10 @@ public:
         }
         if (!EnsurePreviewPaneClass()) {
             DebugLogWin(L"PreviewHandler DoPreview: EnsurePreviewPaneClass failed");
+            return E_FAIL;
+        }
+        if (!EnsurePreviewImageClass()) {
+            DebugLogWin(L"PreviewHandler DoPreview: EnsurePreviewImageClass failed");
             return E_FAIL;
         }
         EnsureRichEditLoaded();
@@ -1416,9 +1571,9 @@ public:
 
         hwndImage_ = CreateWindowExW(
             0,
-            L"STATIC",
+            kPreviewImageWindowClassName,
             nullptr,
-            WS_CHILD | WS_VISIBLE | SS_BITMAP,
+            WS_CHILD | WS_VISIBLE,
             0,
             0,
             10,
@@ -1426,7 +1581,7 @@ public:
             hwndPreview_,
             nullptr,
             g_module,
-            nullptr);
+            this);
         if (!hwndImage_) {
             const DWORD error = GetLastError();
             DebugLogWin(L"PreviewHandler DoPreview: Create image control failed, error=" + std::to_wstring(error));
@@ -1530,6 +1685,8 @@ public:
         fileBytes_.clear();
         metadata_ = ApiumMetadata{};
         sourceFilePath_.clear();
+        meshInfo_ = MeshPreviewResult{};
+        knownMeshFile_ = false;
         return S_OK;
     }
 
@@ -1614,6 +1771,23 @@ private:
         return atom;
     }
 
+    static ATOM EnsurePreviewImageClass() {
+        static std::once_flag once;
+        static ATOM atom = 0;
+        std::call_once(once, []() {
+            WNDCLASSW wc = {};
+            wc.lpfnWndProc = &PreviewImageWndProc;
+            wc.hInstance = g_module;
+            wc.hbrBackground = nullptr;
+            wc.lpszClassName = kPreviewImageWindowClassName;
+            atom = RegisterClassW(&wc);
+            if (atom == 0 && GetLastError() == ERROR_CLASS_ALREADY_EXISTS) {
+                atom = 1;
+            }
+        });
+        return atom;
+    }
+
     static void EnsureRichEditLoaded() {
         static std::once_flag once;
         std::call_once(once, []() {
@@ -1646,6 +1820,27 @@ private:
         return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
 
+    static LRESULT CALLBACK PreviewImageWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+        PreviewHandler* self = reinterpret_cast<PreviewHandler*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (msg == WM_NCCREATE) {
+            const auto* create = reinterpret_cast<const CREATESTRUCTW*>(lParam);
+            self = static_cast<PreviewHandler*>(create->lpCreateParams);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        }
+
+        if (self) {
+            if (msg == WM_ERASEBKGND) {
+                return 1;
+            }
+            if (msg == WM_PAINT) {
+                self->OnImagePaint(hwnd);
+                return 0;
+            }
+        }
+
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
     HBRUSH OnCtlColor(HDC hdc, HWND) {
         if (!backgroundBrush_) {
             RefreshSystemColors();
@@ -1664,6 +1859,48 @@ private:
         GetClientRect(hwndPreview_, &rc);
         FillRect(hdc, &rc, backgroundBrush_.get());
         return 1;
+    }
+
+    void OnImagePaint(HWND hwnd) {
+        PAINTSTRUCT ps = {};
+        HDC hdc = BeginPaint(hwnd, &ps);
+        if (!hdc) {
+            return;
+        }
+
+        RECT rc = {};
+        GetClientRect(hwnd, &rc);
+        if (!backgroundBrush_) {
+            RefreshSystemColors();
+        }
+        FillRect(hdc, &rc, backgroundBrush_.get());
+
+        if (bitmap_ && bitmapPixelWidth_ > 0 && bitmapPixelHeight_ > 0) {
+            HDC memDc = CreateCompatibleDC(hdc);
+            if (memDc) {
+                HGDIOBJ oldBitmap = SelectObject(memDc, bitmap_.get());
+                BLENDFUNCTION blend = {};
+                blend.BlendOp = AC_SRC_OVER;
+                blend.SourceConstantAlpha = 255;
+                blend.AlphaFormat = AC_SRC_ALPHA;
+                (void)AlphaBlend(
+                    hdc,
+                    0,
+                    0,
+                    rc.right - rc.left,
+                    rc.bottom - rc.top,
+                    memDc,
+                    0,
+                    0,
+                    bitmapPixelWidth_,
+                    bitmapPixelHeight_,
+                    blend);
+                SelectObject(memDc, oldBitmap);
+                DeleteDC(memDc);
+            }
+        }
+
+        EndPaint(hwnd, &ps);
     }
 
     void RefreshSystemColors() {
@@ -1692,12 +1929,12 @@ private:
     }
 
     void CleanupWindow() {
-        if (hwndImage_ && bitmap_) {
-            SendMessageW(hwndImage_, STM_SETIMAGE, IMAGE_BITMAP, 0);
-            bitmap_.reset();
-        }
+        bitmap_.reset();
         bitmapPixelWidth_ = 0;
         bitmapPixelHeight_ = 0;
+        meshPreviewMode_ = false;
+        meshPreviewFailed_ = false;
+        meshInfo_ = MeshPreviewResult{};
         if (hwndText_) {
             DestroyWindow(hwndText_);
             hwndText_ = nullptr;
@@ -1725,9 +1962,15 @@ private:
             return;
         }
 
-        std::vector<PreviewRow> rows = BuildPreviewRows(metadata_);
+        std::vector<PreviewRow> rows = knownMeshFile_
+            ? BuildMeshPreviewRows(meshInfo_, sourceFilePath_, fileBytes_.size())
+            : BuildPreviewRows(metadata_);
         std::vector<std::wstring> extraLines;
-        if (!metadata_.isApium) {
+        if (knownMeshFile_) {
+            if (!meshInfo_.isMesh) {
+                extraLines.push_back(L"Mesh metadata could not be parsed.");
+            }
+        } else if (!metadata_.isApium) {
             extraLines = BuildNoMetadataDebugLines(metadata_, initPath_, hostProcessName_);
         } else if (rows.empty()) {
             extraLines.push_back(L"No Apium metadata values available.");
@@ -1764,33 +2007,55 @@ private:
             return;
         }
 
+        HBITMAP nextBitmap = nullptr;
+        if (knownMeshFile_ || sourceFilePath_.empty()) {
+            MeshPreviewResult meshResult = RenderMeshPreviewToHBitmap(fileBytes_, sourceFilePath_, maxSize, &nextBitmap);
+            if (meshResult.rendered && nextBitmap) {
+                knownMeshFile_ = true;
+                meshInfo_ = meshResult;
+                meshPreviewMode_ = true;
+                meshPreviewFailed_ = false;
+                DebugLogWin(
+                    L"PreviewHandler EnsurePreviewBitmap: mesh rendered, format=" + meshResult.format +
+                    L", polygons=" + std::to_wstring(meshResult.polygons) +
+                    L", size=" + std::to_wstring(maxSize));
+                RenderPreviewContent();
+            } else if (knownMeshFile_) {
+                meshPreviewMode_ = true;
+                meshPreviewFailed_ = true;
+                DebugLogWin(
+                    L"PreviewHandler EnsurePreviewBitmap: mesh render failed, status=" + meshResult.status +
+                    L", file=" + (sourceFilePath_.empty() ? std::wstring(L"<stream>") : sourceFilePath_));
+                bitmap_.reset();
+                bitmapPixelWidth_ = 0;
+                bitmapPixelHeight_ = 0;
+                InvalidateRect(hwndImage_, nullptr, TRUE);
+                return;
+            }
+        }
+
         std::vector<uint8_t> png = metadata_.thumbnailBytes;
-        if (png.empty()) {
+        if (!nextBitmap && png.empty()) {
             (void)LoadFallbackPng(g_module, png);
         }
 
-        HBITMAP nextBitmap = nullptr;
-        if (!png.empty()) {
+        if (!nextBitmap && !png.empty()) {
             (void)DecodePngToHBitmap(png, maxSize, &nextBitmap);
         }
         if (!nextBitmap) {
             return;
         }
 
-        BITMAP bmpInfo = {};
-        if (GetObjectW(nextBitmap, sizeof(bmpInfo), &bmpInfo) == sizeof(bmpInfo)) {
-            bitmapPixelWidth_ = std::max(1L, bmpInfo.bmWidth);
-            bitmapPixelHeight_ = std::max(1L, bmpInfo.bmHeight);
-        } else {
+        if (!GetBitmapSize(nextBitmap, bitmapPixelWidth_, bitmapPixelHeight_)) {
             bitmapPixelWidth_ = 0;
             bitmapPixelHeight_ = 0;
         }
 
-        SendMessageW(hwndImage_, STM_SETIMAGE, IMAGE_BITMAP, reinterpret_cast<LPARAM>(nextBitmap));
         if (bitmap_) {
             bitmap_.reset();
         }
         bitmap_.reset(nextBitmap);
+        InvalidateRect(hwndImage_, nullptr, TRUE);
     }
 
     void Layout() {
@@ -1826,13 +2091,16 @@ private:
 
         const int footerHeight = 24;
         const int imageTop = 8;
-        const int imageHeight = std::max(120, ((height - imageTop) * 58) / 100);
         const int imagePadding = 8;
+        const int imageHeight = std::max(120, ((height - imageTop) * 58) / 100);
         const int imageAvailableWidth = std::max(1, width - (imagePadding * 2));
         const int imageAvailableHeight = std::max(1, imageHeight - imageTop - imagePadding);
         const int imageBottomGap = 3;
 
         EnsurePreviewBitmap(static_cast<UINT>(std::min(imageAvailableWidth, imageAvailableHeight)));
+
+        ShowWindow(hwndText_, SW_SHOWNA);
+        ShowWindow(hwndFooter_, SW_SHOWNA);
 
         int renderW = imageAvailableWidth;
         int renderH = imageAvailableHeight;
@@ -1873,7 +2141,11 @@ private:
     std::wstring hostProcessName_;
     std::wstring initPath_;
     std::wstring sourceFilePath_;
+    MeshPreviewResult meshInfo_;
     bool richEditActive_ = true;
+    bool knownMeshFile_ = false;
+    bool meshPreviewMode_ = false;
+    bool meshPreviewFailed_ = false;
     ComPtr<IUnknown> site_;
 };
 

@@ -19,6 +19,7 @@ configure_file("${CMAKE_SOURCE_DIR}/src/apium_version.h.in" "${AP_VERSION_HEADER
 
 add_library(ApiumSlicerExplorerPreview SHARED
     src/dllmain.cpp
+    src/mesh_preview.cpp
     src/metadata.cpp
     deps/miniz/miniz.c
     src/resources.rc
@@ -47,6 +48,7 @@ target_link_libraries(ApiumSlicerExplorerPreview PRIVATE
     Shlwapi
     User32
     Gdi32
+    Msimg32
     Propsys
     Uuid
     Windowscodecs
