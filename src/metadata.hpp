@@ -37,6 +37,10 @@ struct ApiumMetadata {
 
 bool ReadStreamFully(IStream* stream, std::vector<uint8_t>& outBytes);
 bool ReadFileFully(const wchar_t* filePath, std::vector<uint8_t>& outBytes);
+// GCODE is read from the end in bounded windows. Full bytes are retained only
+// for ZIP/mesh inputs that the preview renderer still needs.
+bool ReadPreviewStream(IStream* stream, std::vector<uint8_t>& outBytes, ApiumMetadata& metadata, bool forceGcode = false);
+bool ReadPreviewFile(const wchar_t* filePath, std::vector<uint8_t>& outBytes, ApiumMetadata& metadata);
 bool IsZipContainer(const std::vector<uint8_t>& bytes);
 bool LoadFallbackPng(HINSTANCE module, std::vector<uint8_t>& outBytes);
 bool DecodePngToHBitmap(const std::vector<uint8_t>& pngBytes, UINT requestedMaxSize, HBITMAP* outBitmap);

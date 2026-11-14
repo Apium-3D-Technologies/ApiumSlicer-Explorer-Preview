@@ -1016,14 +1016,13 @@ public:
         if (!stream) {
             return E_INVALIDARG;
         }
-        if (!ReadStreamFully(stream, fileBytes_)) {
-            DebugLogWin(L"ThumbnailProvider Initialize(IStream): ReadStreamFully failed");
+        if (!ReadPreviewStream(stream, fileBytes_, metadata_)) {
+            DebugLogWin(L"ThumbnailProvider Initialize(IStream): ReadPreviewStream failed");
             fileBytes_.clear();
             metadata_ = ApiumMetadata{};
             initialized_ = true;
             return S_OK;
         }
-        metadata_ = ParseApiumMetadata(fileBytes_);
         initialized_ = true;
         DebugLogWin(
             L"ThumbnailProvider Initialize(IStream): success, container=" + metadata_.diagnostics.container +
@@ -1038,14 +1037,13 @@ public:
         if (!filePath) {
             return E_INVALIDARG;
         }
-        if (!ReadFileFully(filePath, fileBytes_)) {
-            DebugLogWin(L"ThumbnailProvider Initialize(IFile): ReadFileFully failed");
+        if (!ReadPreviewFile(filePath, fileBytes_, metadata_)) {
+            DebugLogWin(L"ThumbnailProvider Initialize(IFile): ReadPreviewFile failed");
             fileBytes_.clear();
             metadata_ = ApiumMetadata{};
             initialized_ = true;
             return S_OK;
         }
-        metadata_ = ParseApiumMetadata(fileBytes_);
         initialized_ = true;
         DebugLogWin(
             L"ThumbnailProvider Initialize(IFile): success, container=" + metadata_.diagnostics.container +
@@ -1073,12 +1071,10 @@ public:
 
         std::wstring path(filePath);
         CoTaskMemFree(filePath);
-        if (!ReadFileFully(path.c_str(), fileBytes_)) {
-            DebugLogWin(L"ThumbnailProvider Initialize(IShellItem): ReadFileFully failed for " + path);
+        if (!ReadPreviewFile(path.c_str(), fileBytes_, metadata_)) {
+            DebugLogWin(L"ThumbnailProvider Initialize(IShellItem): ReadPreviewFile failed for " + path);
             fileBytes_.clear();
             metadata_ = ApiumMetadata{};
-        } else {
-            metadata_ = ParseApiumMetadata(fileBytes_);
         }
         initialized_ = true;
         DebugLogWin(
@@ -1244,8 +1240,8 @@ public:
         std::wstring path(filePath);
         CoTaskMemFree(filePath);
 
-        if (!ReadFileFully(path.c_str(), fileBytes_)) {
-            DebugLogWin(L"PreviewHandler Initialize(IShellItem): ReadFileFully failed for " + path);
+        if (!ReadPreviewFile(path.c_str(), fileBytes_, metadata_)) {
+            DebugLogWin(L"PreviewHandler Initialize(IShellItem): ReadPreviewFile failed for " + path);
             fileBytes_.clear();
             metadata_ = ApiumMetadata{};
             metadata_.diagnostics.container = L"unknown";
@@ -1253,8 +1249,6 @@ public:
             metadata_.diagnostics.decode = L"n/a";
             metadata_.diagnostics.apiumDetect = L"n/a";
             metadata_.diagnostics.missingFields = L"file bytes unavailable";
-        } else {
-            metadata_ = ParseApiumMetadata(fileBytes_);
         }
 
         initPath_ = L"IShellItem";
@@ -1286,8 +1280,8 @@ public:
         if (!stream) {
             return E_INVALIDARG;
         }
-        if (!ReadStreamFully(stream, fileBytes_)) {
-            DebugLogWin(L"PreviewHandler Initialize(IStream): ReadStreamFully failed");
+        if (!ReadPreviewStream(stream, fileBytes_, metadata_)) {
+            DebugLogWin(L"PreviewHandler Initialize(IStream): ReadPreviewStream failed");
             fileBytes_.clear();
             metadata_ = ApiumMetadata{};
             metadata_.diagnostics.container = L"unknown";
@@ -1295,8 +1289,6 @@ public:
             metadata_.diagnostics.decode = L"n/a";
             metadata_.diagnostics.apiumDetect = L"n/a";
             metadata_.diagnostics.missingFields = L"file bytes unavailable";
-        } else {
-            metadata_ = ParseApiumMetadata(fileBytes_);
         }
         initPath_ = L"IStream";
         sourceFilePath_.clear();
@@ -1315,8 +1307,8 @@ public:
         if (!filePath) {
             return E_INVALIDARG;
         }
-        if (!ReadFileFully(filePath, fileBytes_)) {
-            DebugLogWin(L"PreviewHandler Initialize(IFile): ReadFileFully failed");
+        if (!ReadPreviewFile(filePath, fileBytes_, metadata_)) {
+            DebugLogWin(L"PreviewHandler Initialize(IFile): ReadPreviewFile failed");
             fileBytes_.clear();
             metadata_ = ApiumMetadata{};
             metadata_.diagnostics.container = L"unknown";
@@ -1324,8 +1316,6 @@ public:
             metadata_.diagnostics.decode = L"n/a";
             metadata_.diagnostics.apiumDetect = L"n/a";
             metadata_.diagnostics.missingFields = L"file bytes unavailable";
-        } else {
-            metadata_ = ParseApiumMetadata(fileBytes_);
         }
         initPath_ = L"IFile";
         sourceFilePath_ = filePath;
@@ -1942,13 +1932,12 @@ public:
             return E_INVALIDARG;
         }
         std::vector<uint8_t> fileBytes;
-        if (!ReadStreamFully(stream, fileBytes)) {
-            DebugLogWin(L"PropertyHandler Initialize(IStream): ReadStreamFully failed");
+        if (!ReadPreviewStream(stream, fileBytes, metadata_)) {
+            DebugLogWin(L"PropertyHandler Initialize(IStream): ReadPreviewStream failed");
             metadata_ = ApiumMetadata{};
             initialized_ = true;
             return S_OK;
         }
-        metadata_ = ParseApiumMetadata(fileBytes);
         initialized_ = true;
         DebugLogWin(metadata_.isApium ? L"PropertyHandler Initialize(IStream): metadata isApium=true" : L"PropertyHandler Initialize(IStream): metadata isApium=false");
         return S_OK;
@@ -1962,13 +1951,12 @@ public:
             return E_INVALIDARG;
         }
         std::vector<uint8_t> fileBytes;
-        if (!ReadFileFully(filePath, fileBytes)) {
-            DebugLogWin(L"PropertyHandler Initialize(IFile): ReadFileFully failed");
+        if (!ReadPreviewFile(filePath, fileBytes, metadata_)) {
+            DebugLogWin(L"PropertyHandler Initialize(IFile): ReadPreviewFile failed");
             metadata_ = ApiumMetadata{};
             initialized_ = true;
             return S_OK;
         }
-        metadata_ = ParseApiumMetadata(fileBytes);
         initialized_ = true;
         DebugLogWin(metadata_.isApium ? L"PropertyHandler Initialize(IFile): metadata isApium=true" : L"PropertyHandler Initialize(IFile): metadata isApium=false");
         return S_OK;
@@ -1995,11 +1983,9 @@ public:
         CoTaskMemFree(filePath);
 
         std::vector<uint8_t> fileBytes;
-        if (!ReadFileFully(path.c_str(), fileBytes)) {
-            DebugLogWin(L"PropertyHandler Initialize(IShellItem): ReadFileFully failed for " + path);
+        if (!ReadPreviewFile(path.c_str(), fileBytes, metadata_)) {
+            DebugLogWin(L"PropertyHandler Initialize(IShellItem): ReadPreviewFile failed for " + path);
             metadata_ = ApiumMetadata{};
-        } else {
-            metadata_ = ParseApiumMetadata(fileBytes);
         }
         initialized_ = true;
         DebugLogWin(metadata_.isApium ? L"PropertyHandler Initialize(IShellItem): metadata isApium=true" : L"PropertyHandler Initialize(IShellItem): metadata isApium=false");

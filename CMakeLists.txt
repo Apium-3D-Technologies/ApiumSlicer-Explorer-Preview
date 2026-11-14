@@ -52,3 +52,16 @@ target_link_libraries(ApiumSlicerExplorerPreview PRIVATE
     Windowscodecs
     Crypt32
 )
+
+include(CTest)
+if (BUILD_TESTING)
+    add_executable(ApiumMetadataTests
+        src/metadata_tests.cpp
+        src/metadata.cpp
+        deps/miniz/miniz.c
+    )
+    target_include_directories(ApiumMetadataTests PRIVATE "${CMAKE_SOURCE_DIR}/deps/miniz")
+    target_compile_definitions(ApiumMetadataTests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_libraries(ApiumMetadataTests PRIVATE Ole32 OleAut32 Shlwapi Gdi32 Uuid Windowscodecs Crypt32)
+    add_test(NAME ApiumMetadataTests COMMAND ApiumMetadataTests)
+endif()

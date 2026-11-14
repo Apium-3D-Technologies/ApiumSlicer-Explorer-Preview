@@ -1,6 +1,7 @@
 #include "metadata.hpp"
 
 #include <msopc.h>
+#include <shlwapi.h>
 #include <strsafe.h>
 #include <wincodec.h>
 #include <wincrypt.h>
@@ -9,6 +10,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <climits>
 #include <cstddef>
 #include <cstring>
 #include <cwctype>
@@ -28,6 +30,8 @@ using Microsoft::WRL::ComPtr;
 namespace {
 
 constexpr size_t kTailScanBytes = 8ULL * 1024ULL * 1024ULL;
+constexpr size_t kInitialTailBytes = 64ULL * 1024ULL;
+constexpr size_t kHeaderScanBytes = 1ULL * 1024ULL * 1024ULL;
 constexpr std::wstring_view kConfigPartPath = L"/Metadata/Slic3r_PE.config";
 
 const std::array<std::wstring_view, 8> kThumbnailA3dCandidates = {
@@ -73,13 +77,9 @@ std::wstring TrimWide(std::wstring value) {
 
 std::string TrimAscii(std::string value) {
     auto isSpace = [](unsigned char ch) { return std::isspace(ch) != 0; };
-    while (!value.empty() && isSpace(static_cast<unsigned char>(value.front()))) {
-        value.erase(value.begin());
-    }
-    while (!value.empty() && isSpace(static_cast<unsigned char>(value.back()))) {
-        value.pop_back();
-    }
-    return value;
+    const auto begin = std::find_if_not(value.begin(), value.end(), isSpace);
+    const auto end = std::find_if_not(value.rbegin(), value.rend(), isSpace).base();
+    return begin < end ? std::string(begin, end) : std::string{};
 }
 
 std::string ToLowerAscii(std::string_view text) {
@@ -1005,25 +1005,6 @@ ParsedMapResult ParseKeyValuesFromText(std::string_view text, bool commentOnly) 
     return result;
 }
 
-size_t FindLastSubstring(const std::string& haystack, std::string_view needle, size_t searchStartExclusive) {
-    if (needle.empty() || haystack.size() < needle.size()) {
-        return std::string::npos;
-    }
-
-    size_t pos = std::min(searchStartExclusive, haystack.size() - needle.size());
-    while (true) {
-        const size_t found = haystack.rfind(needle, pos);
-        if (found != std::string::npos) {
-            return found;
-        }
-        if (pos == 0) {
-            break;
-        }
-        --pos;
-    }
-    return std::string::npos;
-}
-
 bool DecodeBase64(const std::string& base64Text, std::vector<uint8_t>& outBytes) {
     outBytes.clear();
     DWORD binarySize = 0;
@@ -1053,7 +1034,7 @@ bool DecodeBase64(const std::string& base64Text, std::vector<uint8_t>& outBytes)
     return !outBytes.empty();
 }
 
-bool ParseGcodeThumbnailBlock(const std::string& text, size_t scanStart, std::vector<uint8_t>& outPngBytes) {
+bool ParseGcodeThumbnailBlock(std::string_view text, size_t scanStart, std::vector<uint8_t>& outPngBytes) {
     constexpr std::string_view kBeginTag = "; thumbnail_PNG begin";
     constexpr std::string_view kEndTag = "; thumbnail_PNG end";
 
@@ -1062,7 +1043,7 @@ bool ParseGcodeThumbnailBlock(const std::string& text, size_t scanStart, std::ve
         return false;
     }
 
-    const size_t beginPos = FindLastSubstring(text, kBeginTag, endPos);
+    const size_t beginPos = text.rfind(kBeginTag, endPos);
     if (beginPos == std::string::npos || beginPos < scanStart) {
         return false;
     }
@@ -1110,18 +1091,6 @@ bool ParseGcodeThumbnailBlock(const std::string& text, size_t scanStart, std::ve
     return DecodeBase64(base64Data, outPngBytes);
 }
 
-bool HasRequiredFields(const ApiumMetadata& metadata) {
-    return !metadata.printer.empty() &&
-           !metadata.materialType.empty() &&
-           !metadata.nozzleDiameter.empty() &&
-           !metadata.nozzleTemperature.empty() &&
-           !metadata.bedTemperature.empty() &&
-           !metadata.layerHeight.empty() &&
-           !metadata.perimeters.empty() &&
-           !metadata.infillPattern.empty() &&
-           !metadata.infillDensity.empty();
-}
-
 std::wstring BuildMissingFields(const ApiumMetadata& metadata) {
     std::vector<std::wstring_view> missing;
     if (metadata.printer.empty()) {
@@ -1166,17 +1135,19 @@ std::wstring BuildMissingFields(const ApiumMetadata& metadata) {
     return text;
 }
 
-void ParseGcodeMetadata(const std::vector<uint8_t>& fileBytes, ApiumMetadata& metadata) {
+void ParseGcodeWindows(std::string_view tail, std::string_view header, ApiumMetadata& metadata) {
     metadata.diagnostics.configPartStatus = L"n/a";
     metadata.diagnostics.configPartPath = L"n/a";
     metadata.diagnostics.decode = L"n/a";
     metadata.diagnostics.apiumDetect = L"none";
 
-    std::string text(reinterpret_cast<const char*>(fileBytes.data()), fileBytes.size());
-    const size_t tailStart = text.size() > kTailScanBytes ? text.size() - kTailScanBytes : 0;
-
-    std::string_view tailView(text.data() + tailStart, text.size() - tailStart);
-    ParsedMapResult tailResult = ParseKeyValuesFromText(tailView, true);
+    ParsedMapResult tailResult = ParseKeyValuesFromText(tail, true);
+    ParsedMapResult headerResult = ParseKeyValuesFromText(header, true);
+    // Footer values always take precedence over legacy header comments.
+    for (auto& [key, value] : headerResult.keyValues) {
+        tailResult.keyValues.try_emplace(key, std::move(value));
+    }
+    tailResult.hasApiumGeneratorMarker |= headerResult.hasApiumGeneratorMarker;
     if (tailResult.hasApiumGeneratorMarker) {
         metadata.diagnostics.apiumDetect = L"marker";
     } else if (tailResult.hasApiumConfigBlock) {
@@ -1184,35 +1155,87 @@ void ParseGcodeMetadata(const std::vector<uint8_t>& fileBytes, ApiumMetadata& me
     }
     metadata.isApium = tailResult.hasApiumGeneratorMarker || tailResult.hasApiumConfigBlock;
     FillMetadataFieldsFromMap(metadata, tailResult.keyValues);
-    (void)ParseGcodeThumbnailBlock(text, tailStart, metadata.thumbnailBytes);
-
-    const bool needsFallback = !metadata.isApium || !HasRequiredFields(metadata) || metadata.thumbnailBytes.empty();
-    if (!needsFallback) {
-        metadata.diagnostics.missingFields = BuildMissingFields(metadata);
-        return;
-    }
-
-    ParsedMapResult fullResult = ParseKeyValuesFromText(text, true);
-    const bool fullApium = fullResult.hasApiumGeneratorMarker || fullResult.hasApiumConfigBlock;
-    if (fullResult.hasApiumGeneratorMarker) {
-        metadata.diagnostics.apiumDetect = L"marker";
-    } else if (fullResult.hasApiumConfigBlock) {
-        metadata.diagnostics.apiumDetect = L"configblock";
-    }
-    if (fullApium) {
-        metadata.isApium = true;
-    }
-    if (!HasRequiredFields(metadata) || fullApium) {
-        FillMetadataFieldsFromMap(metadata, fullResult.keyValues);
-    }
+    (void)ParseGcodeThumbnailBlock(tail, 0, metadata.thumbnailBytes);
     if (metadata.thumbnailBytes.empty()) {
-        (void)ParseGcodeThumbnailBlock(text, 0, metadata.thumbnailBytes);
-    }
-
-    if (!metadata.isApium && metadata.diagnostics.apiumDetect.empty()) {
-        metadata.diagnostics.apiumDetect = L"none";
+        (void)ParseGcodeThumbnailBlock(header, 0, metadata.thumbnailBytes);
     }
     metadata.diagnostics.missingFields = BuildMissingFields(metadata);
+}
+
+std::string_view CompleteTailLines(std::string_view text, bool truncated) {
+    if (truncated) {
+        const size_t newline = text.find('\n');
+        text = newline == std::string_view::npos ? std::string_view{} : text.substr(newline + 1);
+    }
+    return text;
+}
+
+std::string_view CompleteHeaderLines(std::string_view text, bool truncated) {
+    if (truncated) {
+        const size_t newline = text.rfind('\n');
+        text = newline == std::string_view::npos ? std::string_view{} : text.substr(0, newline + 1);
+    }
+    return text;
+}
+
+void ParseGcodeMetadata(const std::vector<uint8_t>& fileBytes, ApiumMetadata& metadata) {
+    const std::string_view text(fileBytes.empty() ? "" : reinterpret_cast<const char*>(fileBytes.data()), fileBytes.size());
+    const size_t tailStart = text.size() > kTailScanBytes ? text.size() - kTailScanBytes : 0;
+    const auto tail = CompleteTailLines(text.substr(tailStart), tailStart != 0);
+    const size_t headerSize = std::min(tailStart, kHeaderScanBytes);
+    const auto header = CompleteHeaderLines(text.substr(0, headerSize), headerSize < text.size());
+    ParseGcodeWindows(tail, header, metadata);
+}
+
+bool ReadStreamRange(IStream* stream, ULONGLONG offset, size_t size, std::vector<uint8_t>& bytes) {
+    bytes.clear();
+    LARGE_INTEGER position = {};
+    position.QuadPart = static_cast<LONGLONG>(offset);
+    if (FAILED(stream->Seek(position, STREAM_SEEK_SET, nullptr))) {
+        return false;
+    }
+    bytes.resize(size);
+    size_t total = 0;
+    while (total < size) {
+        ULONG read = 0;
+        const ULONG request = static_cast<ULONG>(std::min<size_t>(size - total, 1U << 20));
+        if (FAILED(stream->Read(bytes.data() + total, request, &read)) || read == 0 || read > request) {
+            bytes.clear();
+            return false;
+        }
+        total += read;
+    }
+    return true;
+}
+
+std::string_view ByteView(const std::vector<uint8_t>& bytes) {
+    return {bytes.empty() ? "" : reinterpret_cast<const char*>(bytes.data()), bytes.size()};
+}
+
+size_t FindFooterStart(std::string_view text) {
+    return std::min(text.rfind("; apiumslicer_config = begin"), text.rfind("; prusaslicer_config = begin"));
+}
+
+bool LooksLikeGcode(std::string_view header, std::string_view tail) {
+    if (FindFooterStart(tail) != std::string_view::npos) {
+        return true;
+    }
+    // IInitializeWithStream has no extension. Keep ZIP/STL/OBJ inputs on their
+    // existing full-read path, including binary STL headers starting with ';'.
+    if (header.find('\0') != std::string_view::npos) {
+        return false;
+    }
+    if (header.starts_with("\xEF\xBB\xBF")) {
+        header.remove_prefix(3);
+    }
+    const size_t start = header.find_first_not_of(" \t\r\n");
+    if (start == std::string_view::npos) {
+        return false;
+    }
+    header.remove_prefix(start);
+    return header.front() == ';' ||
+           (header.size() > 1 && (header.front() == 'G' || header.front() == 'M' || header.front() == 'T') &&
+            std::isdigit(static_cast<unsigned char>(header[1])));
 }
 
 void ParseA3dMetadata(const std::vector<uint8_t>& fileBytes, ApiumMetadata& metadata) {
@@ -1305,6 +1328,93 @@ void ParseA3dMetadata(const std::vector<uint8_t>& fileBytes, ApiumMetadata& meta
 
 } // namespace
 
+bool ReadPreviewStream(IStream* stream, std::vector<uint8_t>& outBytes, ApiumMetadata& metadata, bool forceGcode) {
+    outBytes.clear();
+    metadata = {};
+    if (!stream) {
+        return false;
+    }
+
+    LARGE_INTEGER zero = {};
+    ULARGE_INTEGER end = {};
+    // Seek to EOF before any content read. Never fall back to reading an entire
+    // GCODE stream if the provider cannot support random access.
+    if (FAILED(stream->Seek(zero, STREAM_SEEK_END, &end)) || end.QuadPart > LLONG_MAX) {
+        return false;
+    }
+    const ULONGLONG fileSize = end.QuadPart;
+    size_t tailSize = static_cast<size_t>(std::min<ULONGLONG>(fileSize, kInitialTailBytes));
+    std::vector<uint8_t> tailBytes;
+    if (!ReadStreamRange(stream, fileSize - tailSize, tailSize, tailBytes)) {
+        return false;
+    }
+
+    std::vector<uint8_t> headerBytes;
+    if (!forceGcode) {
+        if (!ReadStreamRange(stream, 0, static_cast<size_t>(std::min<ULONGLONG>(fileSize, 4096)), headerBytes)) {
+            return false;
+        }
+        if (IsZipContainer(headerBytes) || !LooksLikeGcode(ByteView(headerBytes), ByteView(tailBytes))) {
+            if (!ReadStreamFully(stream, outBytes)) {
+                return false;
+            }
+            metadata = ParseApiumMetadata(outBytes);
+            return true;
+        }
+    }
+
+    // Grow backwards only until the footer config is covered. An absent PNG or
+    // missing field must never trigger a scan through the G-code body.
+    const size_t tailLimit = static_cast<size_t>(std::min<ULONGLONG>(fileSize, kTailScanBytes));
+    while (tailSize < tailLimit) {
+        const size_t configStart = FindFooterStart(ByteView(tailBytes));
+        // ApiumSlicer writes time/statistics immediately before the config.
+        // Keep some preceding context when the marker is near a window edge.
+        if (configStart != std::string_view::npos && configStart >= 4096) {
+            break;
+        }
+        const size_t nextSize = std::min(tailSize * 2, tailLimit);
+        std::vector<uint8_t> prefix;
+        if (!ReadStreamRange(stream, fileSize - nextSize, nextSize - tailSize, prefix)) {
+            return false;
+        }
+        prefix.insert(prefix.end(), tailBytes.begin(), tailBytes.end());
+        tailBytes = std::move(prefix);
+        tailSize = nextSize;
+    }
+
+    const auto tail = CompleteTailLines(ByteView(tailBytes), tailSize < fileSize);
+    metadata.diagnostics.container = L"GCODE";
+    ParseGcodeWindows(tail, {}, metadata);
+    const bool needsHeader = !metadata.isApium || metadata.thumbnailBytes.empty();
+    std::string_view header;
+    if (needsHeader && tailSize < fileSize) {
+        const size_t headerSize = static_cast<size_t>(std::min<ULONGLONG>(fileSize - tailSize, kHeaderScanBytes));
+        if (!ReadStreamRange(stream, 0, headerSize, headerBytes)) {
+            return false;
+        }
+        header = CompleteHeaderLines(ByteView(headerBytes), headerSize < fileSize);
+    }
+    if (!header.empty()) {
+        ParseGcodeWindows(tail, header, metadata);
+    }
+    return true;
+}
+
+bool ReadPreviewFile(const wchar_t* filePath, std::vector<uint8_t>& outBytes, ApiumMetadata& metadata) {
+    outBytes.clear();
+    metadata = {};
+    if (!filePath || !*filePath) {
+        return false;
+    }
+    ComPtr<IStream> stream;
+    if (FAILED(SHCreateStreamOnFileEx(filePath, STGM_READ | STGM_SHARE_DENY_NONE, FILE_ATTRIBUTE_NORMAL, FALSE, nullptr, &stream))) {
+        return false;
+    }
+    const bool isGcode = _wcsicmp(PathFindExtensionW(filePath), L".gcode") == 0;
+    return ReadPreviewStream(stream.Get(), outBytes, metadata, isGcode);
+}
+
 bool ReadStreamFully(IStream* stream, std::vector<uint8_t>& outBytes) {
     if (!stream) {
         return false;
@@ -1377,7 +1487,7 @@ bool ReadFileFully(const wchar_t* filePath, std::vector<uint8_t>& outBytes) {
     }
 
     outBytes.resize(static_cast<size_t>(size.QuadPart));
-    DWORD totalRead = 0;
+    size_t totalRead = 0;
     while (totalRead < outBytes.size()) {
         const DWORD toRead = static_cast<DWORD>(std::min<size_t>(outBytes.size() - totalRead, 1U << 20));
         DWORD read = 0;
