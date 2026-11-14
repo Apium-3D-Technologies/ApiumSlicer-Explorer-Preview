@@ -1,10 +1,10 @@
 ![ApiumLogo](/doc/resource/apium_logo.png?raw=true)
 
 # ApiumSlicerExplorerPreview
-ApiumSlicerExplorerPreview is a Windows shell extension for `.gcode` and `.a3d` files with:
+ApiumSlicerExplorerPreview is a Windows shell extension for `.gcode`, `.a3d`, `.stl`, and `.obj` files with:
 - Explorer thumbnails (with fallback image)
 - Preview Handler support (Explorer Preview Pane + PowerToys Peek host)
-- Apium-specific metadata properties exposed to Explorer
+- Apium-specific metadata properties exposed to Explorer for `.gcode` and `.a3d`
 
 
 ## Prerequisites
@@ -39,7 +39,7 @@ _**Output:** `build-ninja/ApiumSlicerExplorerPreview.dll`_
 
 ## Scripts
 - Build: `scripts/build.ps1`
-- Register (per-user via `DllRegisterServer`, default with force-bind for `.gcode/.a3d`): `scripts/register.ps1`
+- Register (per-user via `DllRegisterServer`, Apium ProgID, Default Apps capabilities, and shell handlers): `scripts/register.ps1`
 - Unregister (default with Explorer cache clear): `scripts/unregister.ps1`
 - Shell handler diagnostics: `scripts/list-shell-handlers.ps1`
 - Register property schema (admin, optional): `scripts/register-properties-admin.ps1`
@@ -48,8 +48,17 @@ _**Output:** `build-ninja/ApiumSlicerExplorerPreview.dll`_
 Examples:
 - Visual Studio build: `powershell -ExecutionPolicy Bypass -File .\scripts\build.ps1`
 - Ninja build (flag): `powershell -ExecutionPolicy Bypass -File .\scripts\build.ps1 --ninja`
-- Soft register (skip force-bind): `powershell -ExecutionPolicy Bypass -File .\scripts\register.ps1 --soft`
+- Machine register (admin HKLM registration): `powershell -ExecutionPolicy Bypass -File .\scripts\register.ps1 -MachineOnly`
+- Soft register (skip file-type binding refresh): `powershell -ExecutionPolicy Bypass -File .\scripts\register.ps1 --soft`
 - Soft unregister (skip cache clear): `powershell -ExecutionPolicy Bypass -File .\scripts\unregister.ps1 --soft`
+
+## Public 3D File Types
+`.stl` and `.obj` are public Windows/AppX file types. The extension registers
+Apium as an Open With / Default Apps candidate, but Windows 10/11 does not allow
+an installer or script to silently rewrite the user's protected default app
+choice. After registration, select "Apium Slicer" as the default app for `.stl`
+and `.obj` in Windows Settings if Explorer still routes the Preview Pane to
+Microsoft Preview Creator.
 
 ## Runtime Dependencies
 - The produced `ApiumSlicerExplorerPreview.dll` is built with the static MSVC runtime (`/MT`) to avoid requiring a separate Visual C++ Redistributable install.

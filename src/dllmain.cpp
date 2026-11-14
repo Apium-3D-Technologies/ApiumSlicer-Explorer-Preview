@@ -20,6 +20,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -35,7 +36,8 @@ namespace {
 
 constexpr std::wstring_view kThumbnailProviderIidString = L"{E357FCCD-A995-4576-B01F-234630154E96}";
 constexpr std::wstring_view kPreviewHandlerIidString = L"{8895B1C6-B41F-4C1C-A562-0D564250836F}";
-constexpr std::wstring_view kPreviewHostAppId = L"{3B0FE91D-45E1-41E4-A6A7-6F8045AEF35A}";
+constexpr std::wstring_view kPreviewHostAppId = L"{6d2b5079-2f0b-48dd-ab7f-97cec514d30b}";
+constexpr std::wstring_view kLegacyPreviewHostAppId = L"{3B0FE91D-45E1-41E4-A6A7-6F8045AEF35A}";
 constexpr wchar_t kPreviewPaneWindowClassName[] = L"ApiumSlicerPreviewPaneWindow";
 constexpr wchar_t kPreviewImageWindowClassName[] = L"ApiumSlicerPreviewImageWindow";
 
@@ -117,7 +119,13 @@ const std::array<PROPERTYKEY, 11> kApiumPropertyKeys = {
     PKEY_Apium_PrintTime,
 };
 
-constexpr std::array<std::wstring_view, 2> kSupportedExtensions = {L".gcode", L".a3d"};
+constexpr std::array<std::wstring_view, 4> kSupportedExtensions = {L".gcode", L".a3d", L".stl", L".obj"};
+constexpr std::array<std::wstring_view, 2> kPropertyExtensions = {L".gcode", L".a3d"};
+constexpr std::array<std::wstring_view, 2> kPrivateDefaultExtensions = {L".gcode", L".a3d"};
+constexpr std::wstring_view kApiumProgId = L"Apium.Slicer.1";
+constexpr std::wstring_view kApiumVersionIndependentProgId = L"Apium.Slicer";
+constexpr std::wstring_view kApiumRegisteredApplicationName = L"Apium Slicer";
+constexpr std::wstring_view kApiumCapabilitiesPath = L"Software\\ApiumSlicerExplorerPreview\\Capabilities";
 
 HINSTANCE g_module = nullptr;
 std::atomic_ulong g_objCount = 0;
@@ -273,16 +281,83 @@ std::optional<std::wstring> ReadDefaultRegString(HKEY root, const std::wstring& 
     return value;
 }
 
-std::optional<std::wstring> ResolveProgIdForExtension(std::wstring_view ext) {
+std::optional<std::wstring> ReadRegString(HKEY root, const std::wstring& subKey, const wchar_t* valueName) {
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(root, subKey.c_str(), 0, KEY_READ, &key) != ERROR_SUCCESS) {
+        return std::nullopt;
+    }
+
+    DWORD type = 0;
+    DWORD size = 0;
+    if (RegQueryValueExW(key, valueName, nullptr, &type, nullptr, &size) != ERROR_SUCCESS ||
+        (type != REG_SZ && type != REG_EXPAND_SZ) ||
+        size < sizeof(wchar_t)) {
+        RegCloseKey(key);
+        return std::nullopt;
+    }
+
+    std::wstring value(size / sizeof(wchar_t), L'\0');
+    if (RegQueryValueExW(key, valueName, nullptr, &type, reinterpret_cast<LPBYTE>(value.data()), &size) != ERROR_SUCCESS) {
+        RegCloseKey(key);
+        return std::nullopt;
+    }
+    RegCloseKey(key);
+
+    if (!value.empty() && value.back() == L'\0') {
+        value.pop_back();
+    }
+    if (value.empty()) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+std::vector<std::wstring> ResolveProgIdsForExtension(std::wstring_view ext) {
+    std::vector<std::wstring> progIds;
+    std::set<std::wstring> seen;
+
+    auto addProgId = [&](const std::optional<std::wstring>& value) {
+        if (!value.has_value() || value.value().empty()) {
+            return;
+        }
+        if (seen.insert(value.value()).second) {
+            progIds.push_back(value.value());
+        }
+    };
+
+    const std::wstring userChoiceKey =
+        L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\" + std::wstring(ext) + L"\\UserChoice";
+    addProgId(ReadRegString(HKEY_CURRENT_USER, userChoiceKey, L"ProgId"));
+
+    const std::wstring userChoiceLatestKey =
+        L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\" + std::wstring(ext) + L"\\UserChoiceLatest\\ProgId";
+    addProgId(ReadRegString(HKEY_CURRENT_USER, userChoiceLatestKey, L"ProgId"));
+
     const std::wstring extKey = L"Software\\Classes\\" + std::wstring(ext);
-    if (auto value = ReadDefaultRegString(HKEY_CURRENT_USER, extKey); value.has_value()) {
-        return value;
-    }
+    addProgId(ReadDefaultRegString(HKEY_CURRENT_USER, extKey));
+
     const std::wstring hkcrExt = std::wstring(ext);
-    if (auto value = ReadDefaultRegString(HKEY_CLASSES_ROOT, hkcrExt); value.has_value()) {
-        return value;
+    addProgId(ReadDefaultRegString(HKEY_CLASSES_ROOT, hkcrExt));
+
+    return progIds;
+}
+
+bool IsPropertyExtension(std::wstring_view ext) {
+    for (const std::wstring_view propertyExt : kPropertyExtensions) {
+        if (_wcsicmp(std::wstring(ext).c_str(), std::wstring(propertyExt).c_str()) == 0) {
+            return true;
+        }
     }
-    return std::nullopt;
+    return false;
+}
+
+bool IsPrivateDefaultExtension(std::wstring_view ext) {
+    for (const std::wstring_view privateExt : kPrivateDefaultExtensions) {
+        if (_wcsicmp(std::wstring(ext).c_str(), std::wstring(privateExt).c_str()) == 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool IsAppsDarkModeEnabled() {
@@ -325,6 +400,11 @@ HRESULT SetRegDword(HKEY key, const wchar_t* valueName, DWORD value) {
     return HRESULT_FROM_WIN32(status);
 }
 
+HRESULT SetRegNone(HKEY key, const wchar_t* valueName) {
+    const LSTATUS status = RegSetValueExW(key, valueName, 0, REG_NONE, nullptr, 0);
+    return HRESULT_FROM_WIN32(status);
+}
+
 HRESULT CreateRegKeyPath(HKEY root, const std::wstring& subKey, HKEY* outKey) {
     DWORD disposition = 0;
     HKEY key = nullptr;
@@ -356,6 +436,14 @@ void TryDeleteValue(HKEY root, const std::wstring& subKey, const wchar_t* valueN
     }
     (void)RegDeleteValueW(key, valueName);
     RegCloseKey(key);
+}
+
+void TryDeleteDefaultValueIfEquals(HKEY root, const std::wstring& subKey, std::wstring_view expectedValue) {
+    const std::optional<std::wstring> current = ReadDefaultRegString(root, subKey);
+    if (!current.has_value() || _wcsicmp(current->c_str(), std::wstring(expectedValue).c_str()) != 0) {
+        return;
+    }
+    TryDeleteValue(root, subKey, nullptr);
 }
 
 bool WriteTextFileUtf8(const std::wstring& path, const std::string& content) {
@@ -792,12 +880,8 @@ HRESULT RegisterComClassPerUser(const CLSID& clsid, std::wstring_view friendlyNa
     if (SUCCEEDED(hr)) {
         hr = SetRegDword(clsidKey, L"AutomaticallyPreviewUntrustedFiles", 1);
     }
-    if (SUCCEEDED(hr)) {
-        hr = SetRegDword(clsidKey, L"DisableLowILProcessIsolation", 1);
-    }
-    if (SUCCEEDED(hr)) {
-        hr = SetRegDword(clsidKey, L"DisableProcessIsolation", 1);
-    }
+    (void)RegDeleteValueW(clsidKey, L"DisableLowILProcessIsolation");
+    (void)RegDeleteValueW(clsidKey, L"DisableProcessIsolation");
     RegCloseKey(clsidKey);
     if (FAILED(hr)) {
         return hr;
@@ -834,27 +918,126 @@ HRESULT SetClsidValue(const CLSID& clsid, const wchar_t* valueName, std::wstring
     return hr;
 }
 
-HRESULT RegisterPreviewAppIdPerUser() {
-    const std::wstring appIdKeyPath = L"Software\\Classes\\AppID\\" + std::wstring(kPreviewHostAppId);
-    HKEY appIdKey = nullptr;
-    HRESULT hr = CreateRegKeyPath(HKEY_CURRENT_USER, appIdKeyPath, &appIdKey);
+std::wstring BuildOpenWithCommand() {
+    wchar_t systemDir[MAX_PATH] = {};
+    const UINT length = GetSystemDirectoryW(systemDir, static_cast<UINT>(std::size(systemDir)));
+    std::wstring openWithPath = L"OpenWith.exe";
+    if (length > 0 && length < std::size(systemDir)) {
+        openWithPath = systemDir;
+        openWithPath += L"\\OpenWith.exe";
+    }
+    return L"\"" + openWithPath + L"\" \"%1\"";
+}
+
+HRESULT RegisterApiumApplicationPerUser(
+    const std::wstring& thumbClsid,
+    const std::wstring& previewClsid) {
+    const std::wstring modulePath = GetModulePath();
+    if (modulePath.empty()) {
+        return E_FAIL;
+    }
+
+    HKEY key = nullptr;
+    const std::wstring progIdKeyPath = L"Software\\Classes\\" + std::wstring(kApiumProgId);
+    HRESULT hr = CreateRegKeyPath(HKEY_CURRENT_USER, progIdKeyPath, &key);
     if (FAILED(hr)) {
         return hr;
     }
-    hr = SetRegSz(appIdKey, nullptr, L"Apium Slicer Preview Host");
+    hr = SetRegSz(key, nullptr, L"ApiumSlicer");
     if (SUCCEEDED(hr)) {
-        hr = SetRegSz(appIdKey, L"DllSurrogate", L"Prevhost.exe");
+        hr = SetRegSz(key, L"FriendlyTypeName", L"Apium Slicer File");
     }
-    RegCloseKey(appIdKey);
+    RegCloseKey(key);
+    if (FAILED(hr)) {
+        return hr;
+    }
+
+    const std::wstring defaultIconPath = progIdKeyPath + L"\\DefaultIcon";
+    hr = CreateRegKeyPath(HKEY_CURRENT_USER, defaultIconPath, &key);
+    if (FAILED(hr)) {
+        return hr;
+    }
+    hr = SetRegSz(key, nullptr, L"\"" + modulePath + L"\",0");
+    RegCloseKey(key);
+    if (FAILED(hr)) {
+        return hr;
+    }
+
+    const std::wstring openCommandPath = progIdKeyPath + L"\\shell\\open\\command";
+    hr = CreateRegKeyPath(HKEY_CURRENT_USER, openCommandPath, &key);
+    if (FAILED(hr)) {
+        return hr;
+    }
+    hr = SetRegSz(key, nullptr, BuildOpenWithCommand());
+    RegCloseKey(key);
+    if (FAILED(hr)) {
+        return hr;
+    }
+
+    const std::wstring previewPath = progIdKeyPath + L"\\shellex\\" + std::wstring(kPreviewHandlerIidString);
+    hr = CreateRegKeyPath(HKEY_CURRENT_USER, previewPath, &key);
+    if (FAILED(hr)) {
+        return hr;
+    }
+    hr = SetRegSz(key, nullptr, previewClsid);
+    RegCloseKey(key);
+    if (FAILED(hr)) {
+        return hr;
+    }
+
+    const std::wstring thumbPath = progIdKeyPath + L"\\shellex\\" + std::wstring(kThumbnailProviderIidString);
+    hr = CreateRegKeyPath(HKEY_CURRENT_USER, thumbPath, &key);
+    if (FAILED(hr)) {
+        return hr;
+    }
+    hr = SetRegSz(key, nullptr, thumbClsid);
+    RegCloseKey(key);
+    if (FAILED(hr)) {
+        return hr;
+    }
+
+    const std::wstring capabilitiesPath = std::wstring(kApiumCapabilitiesPath);
+    hr = CreateRegKeyPath(HKEY_CURRENT_USER, capabilitiesPath, &key);
+    if (FAILED(hr)) {
+        return hr;
+    }
+    hr = SetRegSz(key, L"ApplicationName", kApiumRegisteredApplicationName);
+    if (SUCCEEDED(hr)) {
+        hr = SetRegSz(key, L"ApplicationDescription", L"Apium Slicer file previews and model files");
+    }
+    RegCloseKey(key);
+    if (FAILED(hr)) {
+        return hr;
+    }
+
+    const std::wstring fileAssociationsPath = capabilitiesPath + L"\\FileAssociations";
+    hr = CreateRegKeyPath(HKEY_CURRENT_USER, fileAssociationsPath, &key);
+    if (FAILED(hr)) {
+        return hr;
+    }
+    for (const std::wstring_view ext : kSupportedExtensions) {
+        hr = SetRegSz(key, std::wstring(ext).c_str(), kApiumProgId);
+        if (FAILED(hr)) {
+            break;
+        }
+    }
+    RegCloseKey(key);
+    if (FAILED(hr)) {
+        return hr;
+    }
+
+    const std::wstring registeredApplicationsPath = L"Software\\RegisteredApplications";
+    hr = CreateRegKeyPath(HKEY_CURRENT_USER, registeredApplicationsPath, &key);
+    if (FAILED(hr)) {
+        return hr;
+    }
+    hr = SetRegSz(key, std::wstring(kApiumRegisteredApplicationName).c_str(), kApiumCapabilitiesPath);
+    RegCloseKey(key);
     return hr;
 }
 
 HRESULT RegisterProviderPerUser() {
     HRESULT hr = RegisterComClassPerUser(CLSID_ApiumSlicerThumbnailProvider, L"Apium Slicer Thumbnail Provider");
-    if (FAILED(hr)) {
-        return hr;
-    }
-    hr = RegisterPreviewAppIdPerUser();
     if (FAILED(hr)) {
         return hr;
     }
@@ -875,7 +1058,42 @@ HRESULT RegisterProviderPerUser() {
     const std::wstring previewClsid = GuidToString(CLSID_ApiumSlicerPreviewHandler);
     const std::wstring propertyClsid = GuidToString(CLSID_ApiumSlicerPropertyHandler);
 
+    hr = RegisterApiumApplicationPerUser(thumbClsid, previewClsid);
+    if (FAILED(hr)) {
+        return hr;
+    }
+
     for (const std::wstring_view ext : kSupportedExtensions) {
+        {
+            const std::wstring keyPath = L"Software\\Classes\\" + std::wstring(ext);
+            HKEY key = nullptr;
+            hr = CreateRegKeyPath(HKEY_CURRENT_USER, keyPath, &key);
+            if (FAILED(hr)) {
+                return hr;
+            }
+            if (IsPrivateDefaultExtension(ext)) {
+                hr = SetRegSz(key, nullptr, kApiumProgId);
+            }
+            RegCloseKey(key);
+            if (FAILED(hr)) {
+                return hr;
+            }
+        }
+
+        {
+            const std::wstring keyPath = L"Software\\Classes\\" + std::wstring(ext) + L"\\OpenWithProgids";
+            HKEY key = nullptr;
+            hr = CreateRegKeyPath(HKEY_CURRENT_USER, keyPath, &key);
+            if (FAILED(hr)) {
+                return hr;
+            }
+            hr = SetRegNone(key, std::wstring(kApiumProgId).c_str());
+            RegCloseKey(key);
+            if (FAILED(hr)) {
+                return hr;
+            }
+        }
+
         {
             const std::wstring keyPath =
                 L"Software\\Classes\\" + std::wstring(ext) + L"\\shellex\\" + std::wstring(kThumbnailProviderIidString);
@@ -923,6 +1141,21 @@ HRESULT RegisterProviderPerUser() {
 
         {
             const std::wstring keyPath =
+                L"Software\\Classes\\SystemFileAssociations\\" + std::wstring(ext) + L"\\shellex\\" + std::wstring(kThumbnailProviderIidString);
+            HKEY key = nullptr;
+            hr = CreateRegKeyPath(HKEY_CURRENT_USER, keyPath, &key);
+            if (FAILED(hr)) {
+                return hr;
+            }
+            hr = SetRegSz(key, nullptr, thumbClsid);
+            RegCloseKey(key);
+            if (FAILED(hr)) {
+                return hr;
+            }
+        }
+
+        if (IsPropertyExtension(ext)) {
+            const std::wstring keyPath =
                 L"Software\\Microsoft\\Windows\\CurrentVersion\\PropertySystem\\PropertyHandlers\\" + std::wstring(ext);
             HKEY key = nullptr;
             hr = CreateRegKeyPath(HKEY_CURRENT_USER, keyPath, &key);
@@ -936,7 +1169,7 @@ HRESULT RegisterProviderPerUser() {
             }
         }
 
-        {
+        if (IsPropertyExtension(ext)) {
             const std::wstring keyPath = L"Software\\Classes\\" + std::wstring(ext);
             HKEY key = nullptr;
             hr = CreateRegKeyPath(HKEY_CURRENT_USER, keyPath, &key);
@@ -956,56 +1189,6 @@ HRESULT RegisterProviderPerUser() {
             }
         }
 
-        if (const auto progId = ResolveProgIdForExtension(ext); progId.has_value()) {
-            const std::wstring progIdKey = L"Software\\Classes\\" + progId.value();
-
-            {
-                const std::wstring keyPath = progIdKey + L"\\shellex\\" + std::wstring(kThumbnailProviderIidString);
-                HKEY key = nullptr;
-                hr = CreateRegKeyPath(HKEY_CURRENT_USER, keyPath, &key);
-                if (FAILED(hr)) {
-                    return hr;
-                }
-                hr = SetRegSz(key, nullptr, thumbClsid);
-                RegCloseKey(key);
-                if (FAILED(hr)) {
-                    return hr;
-                }
-            }
-
-            {
-                const std::wstring keyPath = progIdKey + L"\\shellex\\" + std::wstring(kPreviewHandlerIidString);
-                HKEY key = nullptr;
-                hr = CreateRegKeyPath(HKEY_CURRENT_USER, keyPath, &key);
-                if (FAILED(hr)) {
-                    return hr;
-                }
-                hr = SetRegSz(key, nullptr, previewClsid);
-                RegCloseKey(key);
-                if (FAILED(hr)) {
-                    return hr;
-                }
-            }
-
-            {
-                HKEY key = nullptr;
-                hr = CreateRegKeyPath(HKEY_CURRENT_USER, progIdKey, &key);
-                if (FAILED(hr)) {
-                    return hr;
-                }
-                hr = SetRegSz(key, L"PreviewDetails", kPreviewDetailsList);
-                if (SUCCEEDED(hr)) {
-                    hr = SetRegSz(key, L"FullDetails", kPreviewDetailsList);
-                }
-                if (SUCCEEDED(hr)) {
-                    hr = SetRegSz(key, L"InfoTip", kInfoTipList);
-                }
-                RegCloseKey(key);
-                if (FAILED(hr)) {
-                    return hr;
-                }
-            }
-        }
     }
 
     {
@@ -1023,7 +1206,7 @@ HRESULT RegisterProviderPerUser() {
     }
 
     TryRegisterPropertySchema();
-    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
+    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST | SHCNF_FLUSH, nullptr, nullptr);
     return S_OK;
 }
 
@@ -1042,18 +1225,29 @@ HRESULT UnregisterProviderPerUser() {
         TryDeleteKeyTree(
             HKEY_CURRENT_USER,
             L"Software\\Classes\\SystemFileAssociations\\" + std::wstring(ext) + L"\\shellex\\" + std::wstring(kPreviewHandlerIidString));
+        TryDeleteKeyTree(
+            HKEY_CURRENT_USER,
+            L"Software\\Classes\\SystemFileAssociations\\" + std::wstring(ext) + L"\\shellex\\" + std::wstring(kThumbnailProviderIidString));
         TryDeleteKeyTree(HKEY_CURRENT_USER, L"Software\\Classes\\" + std::wstring(ext) + L"\\shellex\\PropertyHandler");
         TryDeleteKeyTree(
             HKEY_CURRENT_USER,
             L"Software\\Microsoft\\Windows\\CurrentVersion\\PropertySystem\\PropertyHandlers\\" + std::wstring(ext));
+        TryDeleteValue(
+            HKEY_CURRENT_USER,
+            L"Software\\Classes\\" + std::wstring(ext) + L"\\OpenWithProgids",
+            std::wstring(kApiumProgId).c_str());
+        TryDeleteDefaultValueIfEquals(
+            HKEY_CURRENT_USER,
+            L"Software\\Classes\\" + std::wstring(ext),
+            kApiumProgId);
 
         const std::wstring extKey = L"Software\\Classes\\" + std::wstring(ext);
         TryDeleteValue(HKEY_CURRENT_USER, extKey, L"PreviewDetails");
         TryDeleteValue(HKEY_CURRENT_USER, extKey, L"FullDetails");
         TryDeleteValue(HKEY_CURRENT_USER, extKey, L"InfoTip");
 
-        if (const auto progId = ResolveProgIdForExtension(ext); progId.has_value()) {
-            const std::wstring progIdKey = L"Software\\Classes\\" + progId.value();
+        for (const std::wstring& progId : ResolveProgIdsForExtension(ext)) {
+            const std::wstring progIdKey = L"Software\\Classes\\" + progId;
             TryDeleteKeyTree(HKEY_CURRENT_USER, progIdKey + L"\\shellex\\" + std::wstring(kThumbnailProviderIidString));
             TryDeleteKeyTree(HKEY_CURRENT_USER, progIdKey + L"\\shellex\\" + std::wstring(kPreviewHandlerIidString));
             TryDeleteKeyTree(HKEY_CURRENT_USER, progIdKey + L"\\shellex\\PropertyHandler");
@@ -1071,11 +1265,17 @@ HRESULT UnregisterProviderPerUser() {
     TryDeleteKeyTree(HKEY_CURRENT_USER, L"Software\\Classes\\CLSID\\" + thumbClsid);
     TryDeleteKeyTree(HKEY_CURRENT_USER, L"Software\\Classes\\CLSID\\" + previewClsid);
     TryDeleteKeyTree(HKEY_CURRENT_USER, L"Software\\Classes\\CLSID\\" + propertyClsid);
-    TryDeleteKeyTree(HKEY_CURRENT_USER, L"Software\\Classes\\AppID\\" + std::wstring(kPreviewHostAppId));
+    TryDeleteKeyTree(HKEY_CURRENT_USER, L"Software\\Classes\\" + std::wstring(kApiumProgId));
+    TryDeleteKeyTree(HKEY_CURRENT_USER, std::wstring(kApiumCapabilitiesPath));
+    TryDeleteValue(
+        HKEY_CURRENT_USER,
+        L"Software\\RegisteredApplications",
+        std::wstring(kApiumRegisteredApplicationName).c_str());
+    TryDeleteKeyTree(HKEY_CURRENT_USER, L"Software\\Classes\\AppID\\" + std::wstring(kLegacyPreviewHostAppId));
 
     TryUnregisterPropertySchema();
 
-    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
+    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST | SHCNF_FLUSH, nullptr, nullptr);
     return S_OK;
 }
 

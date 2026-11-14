@@ -279,5 +279,5 @@ for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
     }
 }
 
-Write-Warning "DLL is still locked after all attempts. Close Explorer windows showing .gcode/.a3d files and rerun."
+Write-Warning "DLL is still locked after all attempts. Close Explorer windows showing .gcode/.a3d/.stl/.obj files and rerun."
 exit 1

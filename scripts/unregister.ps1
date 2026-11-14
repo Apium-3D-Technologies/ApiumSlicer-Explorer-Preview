@@ -3,7 +3,8 @@ param(
     [switch]$Silent,
     [switch]$Soft,
     [switch]$ClearCache,
-    [string[]]$Extensions = @(".gcode", ".a3d"),
+    [switch]$MachineOnly,
+    [string[]]$Extensions = @(".gcode", ".a3d", ".stl", ".obj"),
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$RemainingArgs
 )
@@ -15,7 +16,11 @@ $thumbnailIid = "{E357FCCD-A995-4576-B01F-234630154E96}"
 $apiumPreviewClsid = "{B450D582-1E34-49E0-8AE7-AFF2D2CD2535}"
 $apiumThumbnailClsid = "{8A14EAA2-3FDB-4C5A-98A1-5D0A8700C8A5}"
 $apiumPropertyClsid = "{12D795E2-813D-4E87-93BB-DC5E6239BB42}"
-$previewHostAppId = "{3B0FE91D-45E1-41E4-A6A7-6F8045AEF35A}"
+$previewHostAppId = "{6d2b5079-2f0b-48dd-ab7f-97cec514d30b}"
+$legacyPreviewHostAppId = "{3B0FE91D-45E1-41E4-A6A7-6F8045AEF35A}"
+$apiumProgId = "Apium.Slicer.1"
+$apiumApplicationName = "Apium Slicer"
+$apiumCapabilitiesSubPath = "Software\ApiumSlicerExplorerPreview\Capabilities"
 $legacyRemovedExtensions = @(".3mf")
 
 function Normalize-Extension {
@@ -28,13 +33,16 @@ function Normalize-Extension {
 }
 
 if ($RemainingArgs -and $RemainingArgs.Count -gt 0) {
-    $allowed = @("--soft")
+    $allowed = @("--soft", "--machine-only")
     $unknown = @($RemainingArgs | Where-Object { $_ -notin $allowed })
     if ($unknown.Count -gt 0) {
         throw "Unknown argument(s): $($unknown -join ', ')"
     }
     if ($RemainingArgs -contains "--soft") {
         $Soft = $true
+    }
+    if ($RemainingArgs -contains "--machine-only") {
+        $MachineOnly = $true
     }
 }
 
@@ -111,6 +119,22 @@ function Remove-KeyIfExists {
     }
 }
 
+function Remove-DefaultIfMatches {
+    param(
+        [string]$Path,
+        [string]$ExpectedValue
+    )
+
+    $current = Get-DefaultValue -Path $Path
+    if ($current -and $current.ToLowerInvariant() -eq $ExpectedValue.ToLowerInvariant()) {
+        $regPath = $Path
+        if ($regPath.StartsWith("Registry::")) {
+            $regPath = $regPath.Substring("Registry::".Length)
+        }
+        & reg.exe delete $regPath /ve /f | Out-Null
+    }
+}
+
 function Get-DefaultValue {
     param([string]$Path)
     try {
@@ -163,6 +187,15 @@ function Resolve-ProgIds {
     } catch {
     }
 
+    $userChoiceLatestPath = "Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\$Extension\UserChoiceLatest\ProgId"
+    try {
+        $userChoiceLatestProgId = (Get-ItemProperty -Path $userChoiceLatestPath -ErrorAction Stop).ProgId
+        if ($userChoiceLatestProgId) {
+            $null = $progIds.Add($userChoiceLatestProgId)
+        }
+    } catch {
+    }
+
     $defaultCandidates = @(
         "Registry::HKEY_CURRENT_USER\Software\Classes\$Extension",
         "Registry::HKEY_CLASSES_ROOT\$Extension"
@@ -203,6 +236,11 @@ function Remove-ApiumBindings {
         Remove-HandlerKeyIfMatches -Path "$extBase\shellex\$previewIid" -ExpectedClsid $apiumPreviewClsid
         Remove-HandlerKeyIfMatches -Path "$extBase\shellex\$thumbnailIid" -ExpectedClsid $apiumThumbnailClsid
         Remove-HandlerKeyIfMatches -Path "$extBase\shellex\PropertyHandler" -ExpectedClsid $apiumPropertyClsid
+        try {
+            Remove-ItemProperty -Path "$extBase\OpenWithProgids" -Name $apiumProgId -ErrorAction SilentlyContinue
+        } catch {
+        }
+        Remove-DefaultIfMatches -Path $extBase -ExpectedValue $apiumProgId
 
         $sfaBase = "$ClassesRoot\SystemFileAssociations\$ext"
         Remove-HandlerKeyIfMatches -Path "$sfaBase\shellex\$previewIid" -ExpectedClsid $apiumPreviewClsid
@@ -235,10 +273,31 @@ function Remove-PropertySystemBindings {
     }
 }
 
+function Get-SoftwareRootForClassesRoot {
+    param([string]$ClassesRoot)
+    if ($ClassesRoot -like "Registry::HKEY_LOCAL_MACHINE*") {
+        return "Registry::HKEY_LOCAL_MACHINE\SOFTWARE"
+    }
+    return "Registry::HKEY_CURRENT_USER\Software"
+}
+
+function Remove-ApiumApplicationRegistration {
+    param([string]$ClassesRoot)
+
+    $softwareRoot = Get-SoftwareRootForClassesRoot -ClassesRoot $ClassesRoot
+    Remove-KeyIfExists -Path "$ClassesRoot\$apiumProgId"
+    Remove-KeyIfExists -Path "$softwareRoot\ApiumSlicerExplorerPreview\Capabilities"
+    try {
+        Remove-ItemProperty -Path "$softwareRoot\RegisteredApplications" -Name $apiumApplicationName -ErrorAction SilentlyContinue
+    } catch {
+    }
+}
+
 function Remove-UserApiumRegistration {
     $removalExtensions = @($Extensions + $legacyRemovedExtensions | Sort-Object -Unique)
     Remove-ApiumBindings -TargetExtensions $removalExtensions
     Remove-PropertySystemBindings -TargetExtensions $removalExtensions
+    Remove-ApiumApplicationRegistration -ClassesRoot "Registry::HKEY_CURRENT_USER\Software\Classes"
 
     $previewHandlers = "Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\PreviewHandlers"
     try {
@@ -249,12 +308,29 @@ function Remove-UserApiumRegistration {
     Remove-KeyIfExists -Path "Registry::HKEY_CURRENT_USER\Software\Classes\CLSID\$apiumPreviewClsid"
     Remove-KeyIfExists -Path "Registry::HKEY_CURRENT_USER\Software\Classes\CLSID\$apiumThumbnailClsid"
     Remove-KeyIfExists -Path "Registry::HKEY_CURRENT_USER\Software\Classes\CLSID\$apiumPropertyClsid"
-    Remove-KeyIfExists -Path "Registry::HKEY_CURRENT_USER\Software\Classes\AppID\$previewHostAppId"
+    Remove-KeyIfExists -Path "Registry::HKEY_CURRENT_USER\Software\Classes\AppID\$legacyPreviewHostAppId"
 }
 
 function Test-IsAdministrator {
     $principal = [Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+if (-not ([System.Management.Automation.PSTypeName]'ShellNotify').Type) {
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+public static class ShellNotify
+{
+    [DllImport("shell32.dll")]
+    public static extern void SHChangeNotify(int wEventId, uint uFlags, IntPtr dwItem1, IntPtr dwItem2);
+}
+"@
+}
+
+function Notify-AssociationChanged {
+    [ShellNotify]::SHChangeNotify(0x08000000, 0x1000, [IntPtr]::Zero, [IntPtr]::Zero)
 }
 
 function Remove-SystemApiumRegistration {
@@ -270,6 +346,7 @@ function Remove-SystemApiumRegistration {
     Remove-PropertySystemBindings `
         -TargetExtensions $removalExtensions `
         -PropertyHandlersPath "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\PropertySystem\PropertyHandlers"
+    Remove-ApiumApplicationRegistration -ClassesRoot "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Classes"
 
     $previewHandlers64 = "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\PreviewHandlers"
     try {
@@ -286,11 +363,24 @@ function Remove-SystemApiumRegistration {
     Remove-KeyIfExists -Path "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Classes\CLSID\$apiumPreviewClsid"
     Remove-KeyIfExists -Path "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Classes\CLSID\$apiumThumbnailClsid"
     Remove-KeyIfExists -Path "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Classes\CLSID\$apiumPropertyClsid"
-    Remove-KeyIfExists -Path "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Classes\AppID\$previewHostAppId"
+    Remove-KeyIfExists -Path "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Classes\AppID\$legacyPreviewHostAppId"
     Write-Host "Removed HKLM COM + PreviewHandlers registration for Apium CLSIDs."
 }
 
 $resolvedDll = Resolve-DllPath -InputPath $DllPath
+
+if ($MachineOnly) {
+    Remove-SystemApiumRegistration
+    Notify-AssociationChanged
+    if ($ClearCache) {
+        Clear-PreviewCaches
+        Write-Host "Explorer thumbnail/preview cache cleared."
+    } else {
+        Write-Host "MachineOnly mode: skipped per-user unregister and cache clear."
+    }
+    exit 0
+}
+
 $args = @("/u", "/s")
 $args += ('"{0}"' -f $resolvedDll)
 
@@ -306,6 +396,8 @@ if (-not $Soft) {
     Write-Host "Removed residual per-user Apium handler bindings."
     Remove-SystemApiumRegistration
 }
+
+Notify-AssociationChanged
 
 if ($ClearCache -or (-not $Soft)) {
     Clear-PreviewCaches
