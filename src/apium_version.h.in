@@ -1,0 +1,5 @@
+#pragma once
+
+#define ASXP_NAME_W L"@ASXP_NAME@"
+#define ASXP_VERSION_W L"@ASXP_VERSION@"
+#define ASXP_AUTHOR_W L"@ASXP_AUTHOR@"

@@ -4,6 +4,8 @@
 !resources/*.png
 !resources/*.propdesc
 !CMakeLists.txt
+!version.inc
+!src/*.h.in
 !.gitattributes
 !scripts/*.ps1
 !doc/resource
