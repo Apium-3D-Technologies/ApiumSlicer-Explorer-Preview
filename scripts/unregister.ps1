@@ -1,9 +1,23 @@
+<#
+.SYNOPSIS
+Unregister the shell extension or only its Explorer property schema.
+.EXAMPLE
+./scripts/unregister.ps1 -Soft
+Unregister without clearing Explorer caches.
+.EXAMPLE
+./scripts/unregister.ps1 -MachineOnly
+.EXAMPLE
+./scripts/unregister.ps1 -SchemaOnly
+Run elevated. Optionally pass -SchemaPath to select a schema file.
+#>
 param(
     [string]$DllPath = "",
     [switch]$Silent,
     [switch]$Soft,
     [switch]$ClearCache,
     [switch]$MachineOnly,
+    [switch]$SchemaOnly,
+    [string]$SchemaPath = "",
     [string[]]$Extensions = @(".gcode", ".a3d", ".stl", ".obj"),
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$RemainingArgs
@@ -45,6 +59,56 @@ if ($RemainingArgs -and $RemainingArgs.Count -gt 0) {
         $MachineOnly = $true
     }
 }
+
+function Test-IsAdministrator {
+    $principal = [Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()
+    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Unregister-PropertySchema {
+    param([string]$Path)
+
+    if (-not (Test-IsAdministrator)) {
+        throw "Property schema changes require an elevated PowerShell."
+    }
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        $Path = Join-Path $PSScriptRoot "../resources/ApiumSlicer.propschema.propdesc"
+    }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Schema file not found: $Path" }
+    $resolvedSchema = (Resolve-Path -LiteralPath $Path).Path
+
+    if (-not ([System.Management.Automation.PSTypeName]'ApiumPropertySchemaNative').Type) {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+public static class ApiumPropertySchemaNative {
+    [DllImport("propsys.dll", CharSet = CharSet.Unicode)]
+    public static extern int PSRegisterPropertySchema(string pszPath);
+
+    [DllImport("propsys.dll", CharSet = CharSet.Unicode)]
+    public static extern int PSUnregisterPropertySchema(string pszPath);
+
+    [DllImport("propsys.dll")]
+    public static extern int PSRefreshPropertySchema();
+}
+"@
+    }
+    $hr = [ApiumPropertySchemaNative]::PSUnregisterPropertySchema($resolvedSchema)
+    if ($hr -ne 0) { throw ("PSUnregisterPropertySchema failed with HRESULT 0x{0:X8}" -f $hr) }
+    $refreshHr = [ApiumPropertySchemaNative]::PSRefreshPropertySchema()
+    if ($refreshHr -ne 0) { throw ("PSRefreshPropertySchema failed with HRESULT 0x{0:X8}" -f $refreshHr) }
+    Write-Host "Unregistered property schema: $resolvedSchema"
+}
+
+# This mode replaces the standalone administrator schema script and does not
+# require a compiled DLL or alter COM/file associations.
+if ($SchemaOnly) {
+    if ($MachineOnly -or $Soft) { throw "Use -SchemaOnly separately from -MachineOnly or -Soft." }
+    Unregister-PropertySchema -Path $SchemaPath
+    exit 0
+}
+if ($SchemaPath) { throw "Use -SchemaOnly with -SchemaPath." }
 
 function Resolve-DllPath {
     param([string]$InputPath)
@@ -309,11 +373,6 @@ function Remove-UserApiumRegistration {
     Remove-KeyIfExists -Path "Registry::HKEY_CURRENT_USER\Software\Classes\CLSID\$apiumThumbnailClsid"
     Remove-KeyIfExists -Path "Registry::HKEY_CURRENT_USER\Software\Classes\CLSID\$apiumPropertyClsid"
     Remove-KeyIfExists -Path "Registry::HKEY_CURRENT_USER\Software\Classes\AppID\$legacyPreviewHostAppId"
-}
-
-function Test-IsAdministrator {
-    $principal = [Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()
-    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
 if (-not ([System.Management.Automation.PSTypeName]'ShellNotify').Type) {
