@@ -3,6 +3,11 @@ cmake_minimum_required(VERSION 3.20)
 project(ApiumSlicerExplorerPreview LANGUAGES C CXX RC)
 include("${CMAKE_SOURCE_DIR}/version.inc")
 
+# Keep local builds on version.inc; release builds can use the pushed tag.
+if (DEFINED ASXP_RELEASE_VERSION)
+    set(ASXP_VERSION "${ASXP_RELEASE_VERSION}")
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)

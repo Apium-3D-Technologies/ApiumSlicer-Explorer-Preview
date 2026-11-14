@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - '**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and release Windows x64
+    runs-on: windows-2022
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Configure Release build
+        run: |
+          $cmakeArgs = @('-S', '.', '-B', 'build', '-G', 'Visual Studio 17 2022', '-A', 'x64', '-DBUILD_TESTING=ON')
+          if ($env:RELEASE_TAG -cmatch '^v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)$') {
+            $cmakeArgs += "-DASXP_RELEASE_VERSION=$($Matches[1])"
+          }
+          cmake @cmakeArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build DLL and tests
+        run: cmake --build build --config Release --parallel
+
+      - name: Run tests
+        run: ctest --test-dir build -C Release --output-on-failure --no-tests=error
+
+      - name: Package release assets
+        run: ./scripts/package-release.ps1
+
+      - name: Publish release with assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $assets = @(
+            'dist/ApiumSlicerExplorerPreview.dll'
+            'dist/ApiumSlicerExplorerPreview-windows-x64.zip'
+            'dist/SHA256SUMS.txt'
+          )
+          # Only stable version tags become regular releases. Other tags are prereleases.
+          $prerelease = $env:RELEASE_TAG -cnotmatch '^v?\d+\.\d+\.\d+(?:\+[0-9A-Za-z.-]+)?$'
+          $releaseArgs = @("--prerelease=$($prerelease.ToString().ToLowerInvariant())")
+          if ($prerelease) { $releaseArgs += '--latest=false' }
+
+          $isDraft = gh release view $env:RELEASE_TAG --json isDraft --jq '.isDraft' 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            if ($isDraft -ne 'true') {
+              throw "Release '$env:RELEASE_TAG' is already published. Push a new tag for a new release."
+            }
+          } else {
+            gh release create $env:RELEASE_TAG --verify-tag --draft --generate-notes --title $env:RELEASE_TAG @releaseArgs
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+          # A failed upload leaves a draft that can be completed by re-running the job.
+          gh release upload $env:RELEASE_TAG @assets --clobber
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          gh release edit $env:RELEASE_TAG --draft=false @releaseArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

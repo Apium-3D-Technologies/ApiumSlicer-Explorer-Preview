@@ -6,6 +6,9 @@
 !CMakeLists.txt
 !version.inc
 !src/*.h.in
+!.github/
+!.github/workflows/
+!.github/workflows/*.yml
 !.gitattributes
 !scripts/*.ps1
 !doc/resource
