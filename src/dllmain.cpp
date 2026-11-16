@@ -30,6 +30,9 @@
 #include "metadata.hpp"
 #include "generated/apium_version.h"
 
+// Show debug information in preview
+//#define SHOW_DEBUG
+
 using Microsoft::WRL::ComPtr;
 
 namespace {
@@ -779,12 +782,13 @@ std::vector<PreviewRow> BuildMeshPreviewRows(
     return rows;
 }
 
-std::vector<std::wstring> BuildNoMetadataDebugLines(
+std::vector<std::wstring> BuildNoMetadataLines(
     const ApiumMetadata& metadata,
     std::wstring_view initPath,
     std::wstring_view hostProcess) {
     std::vector<std::wstring> lines;
     lines.push_back(L"No Apium metadata detected for this file.");
+#ifdef SHOW_DEBUG
     lines.push_back(L"");
     lines.push_back(L"Debug:");
     lines.push_back(L"Build: " + std::wstring(ASXP_NAME_W) + L" v" + std::wstring(ASXP_VERSION_W));
@@ -800,6 +804,7 @@ std::vector<std::wstring> BuildNoMetadataDebugLines(
     lines.push_back(L"Decode: " + metadata.diagnostics.decode);
     lines.push_back(L"ApiumDetect: " + metadata.diagnostics.apiumDetect);
     lines.push_back(L"MissingFields: " + metadata.diagnostics.missingFields);
+#endif
     return lines;
 }
 
@@ -2175,7 +2180,7 @@ private:
                 extraLines.push_back(L"Mesh metadata could not be parsed.");
             }
         } else if (!metadata_.isApium) {
-            extraLines = BuildNoMetadataDebugLines(metadata_, initPath_, hostProcessName_);
+            extraLines = BuildNoMetadataLines(metadata_, initPath_, hostProcessName_);
         } else if (rows.empty()) {
             extraLines.push_back(L"No Apium metadata values available.");
         }

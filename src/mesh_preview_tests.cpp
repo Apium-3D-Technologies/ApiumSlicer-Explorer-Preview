@@ -152,7 +152,7 @@ void CheckThumbnail(HMODULE dll, const std::vector<uint8_t>& bytes) {
     DeleteObject(bitmap);
 }
 
-std::wstring CheckPreview(HMODULE dll, const std::vector<uint8_t>& bytes, const wchar_t* sourcePath = nullptr, bool tetrahedron = false) {
+std::wstring CheckPreview(HMODULE dll, const std::vector<uint8_t>& bytes, const wchar_t* sourcePath = nullptr, bool tetrahedron = false, bool expectMesh = true) {
     using GetFactory = HRESULT(__stdcall*)(REFCLSID, REFIID, void**);
     const auto getFactory = reinterpret_cast<GetFactory>(GetProcAddress(dll, "DllGetClassObject"));
     Check(getFactory != nullptr, "Missing COM factory export");
@@ -188,8 +188,10 @@ std::wstring CheckPreview(HMODULE dll, const std::vector<uint8_t>& bytes, const 
         Check(SUCCEEDED(preview->SetRect(&rect)), "SetRect failed");
         EnumChildWindows(parent, CollectChildText, reinterpret_cast<LPARAM>(&content));
         Check(content.find(L"Apium Preview v") != std::wstring::npos, "Missing version footer");
-        for (const auto* expected : {L"Volume:", L"Surface area:", L"Size:", L"Parts:", L"Mesh errors:", L"Triangles:", L"File size:"}) {
-            Check(content.find(expected) != std::wstring::npos, "Missing requested preview detail");
+        if (expectMesh) {
+            for (const auto* expected : {L"Volume:", L"Surface area:", L"Size:", L"Parts:", L"Mesh errors:", L"Triangles:", L"File size:"}) {
+                Check(content.find(expected) != std::wstring::npos, "Missing requested preview detail");
+            }
         }
         if (tetrahedron) {
             Check(content.find(L"Volume: 4.0 unit\u00b3") != std::wstring::npos, "Volume missing from preview text");
@@ -286,6 +288,13 @@ int wmain(int argc, wchar_t** argv) {
         Check(SUCCEEDED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED)), "COM initialization failed");
         HMODULE dll = LoadLibraryW(argv[1]);
         Check(dll != nullptr, "Cannot load preview DLL");
+        const bool expectPreviewDebug = argc >= 3 && std::wstring_view(argv[2]) == L"--expect-debug";
+        const std::string plainGcode = "; Non-Apium G-code without metadata\nG28\nG1 X0 Y0\n";
+        const auto noMetadataPreview = CheckPreview(dll, {plainGcode.begin(), plainGcode.end()}, nullptr, false, false);
+        Check(noMetadataPreview.find(L"No Apium metadata detected for this file.") != std::wstring::npos, "Missing no-metadata notice");
+        for (const auto* marker : {L"Debug:", L"Build:", L"Host:", L"InitPath:", L"Container:", L"ConfigPart:", L"Decode:", L"ApiumDetect:", L"MissingFields:"}) {
+            Check((noMetadataPreview.find(marker) != std::wstring::npos) == expectPreviewDebug, "Preview diagnostics must match SHOW_DEBUG");
+        }
         CheckThumbnail(dll, bytes);
         CheckThumbnail(dll, asciiBytes);
         CheckThumbnail(dll, objBytes);
@@ -296,7 +305,7 @@ int wmain(int argc, wchar_t** argv) {
         Check(openPreview.find(L"Mesh errors: 3 (open edges: 3)") != std::wstring::npos && openPreview.find(L"Volume: n/a") != std::wstring::npos, "Open-edge error breakdown missing from preview");
         const auto degeneratePreview = CheckPreview(dll, SingleTriangle({{{0, 0, 0}, {1, 0, 0}, {2, 0, 0}}}));
         Check(degeneratePreview.find(L"Mesh errors: 1 (degenerate triangles: 1)") != std::wstring::npos && degeneratePreview.find(L"Parts: 0") != std::wstring::npos, "Degenerate-only mesh diagnostics missing from preview");
-        if (argc >= 3) {
+        if (argc >= 3 && !expectPreviewDebug) {
             std::ifstream file(std::filesystem::path(argv[2]), std::ios::binary);
             Check(file.good(), "Cannot open requested sample");
             const std::vector<uint8_t> sample{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
