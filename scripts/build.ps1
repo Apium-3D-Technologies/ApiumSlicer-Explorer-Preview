@@ -2,8 +2,9 @@
 .SYNOPSIS
 Build the extension and optionally refresh local registration.
 .DESCRIPTION
-Use -Register to release DLL locks before building, then unregister and
-register the new DLL. Use -StopProcesses to release locks without registering.
+Use -Register to build and register a private copy of the new DLL. Legacy locks
+on the build output are released first. Use -StopProcesses to release locks
+without registering.
 Only processes holding the target DLL are stopped; Explorer is restored if needed.
 .EXAMPLE
 ./scripts/build.ps1 -Register
@@ -364,7 +365,6 @@ try {
 
     if ($Register) {
         $resolvedDll = (Resolve-Path -LiteralPath $dllPath).Path
-        Invoke-RegistrationScript -Name "unregister.ps1" -Arguments @("-DllPath", $resolvedDll, "-Soft")
         Invoke-RegistrationScript -Name "register.ps1" -Arguments @("-DllPath", $resolvedDll)
         Write-Host "Development registration completed."
     }

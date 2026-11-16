@@ -117,6 +117,20 @@ function Resolve-DllPath {
         return (Resolve-Path -LiteralPath $InputPath).Path
     }
 
+    # Prefer the installed copy, even after the original build has been removed.
+    $classesRoots = if ($MachineOnly) {
+        @("HKEY_LOCAL_MACHINE\SOFTWARE\Classes")
+    } else {
+        @("HKEY_CURRENT_USER\Software\Classes", "HKEY_LOCAL_MACHINE\SOFTWARE\Classes")
+    }
+    foreach ($classesRoot in $classesRoots) {
+        $key = "Registry::$classesRoot\CLSID\$apiumPreviewClsid\InprocServer32"
+        $registeredDll = Get-DefaultValue -Path $key
+        if ($registeredDll -and (Test-Path -LiteralPath $registeredDll -PathType Leaf)) {
+            return (Resolve-Path -LiteralPath $registeredDll).Path
+        }
+    }
+
     $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
     $candidates = @(
         (Join-Path $repoRoot "build\Release\ApiumSlicerExplorerPreview.dll"),

@@ -1,6 +1,9 @@
 <#
 .SYNOPSIS
 Register the shell extension or only its Explorer property schema.
+.DESCRIPTION
+DLL registration always uses a private copy outside the build directory.
+Each registration gets a new directory so loaded copies never block updates.
 .EXAMPLE
 ./scripts/register.ps1 -DllPath ./build/Release/ApiumSlicerExplorerPreview.dll
 .EXAMPLE
@@ -138,6 +141,22 @@ function Resolve-DllPath {
     throw "DLL not found. Pass -DllPath or build first."
 }
 
+function Copy-DllForRegistration {
+    param([Parameter(Mandatory = $true)][string]$SourcePath)
+
+    # Elevated registration also updates HKLM, so use a location shared by users.
+    $baseDir = if (Test-IsAdministrator) { $env:ProgramFiles } else { $env:LOCALAPPDATA }
+    if ([string]::IsNullOrWhiteSpace($baseDir)) {
+        throw "Cannot determine the DLL installation directory."
+    }
+    $installDir = Join-Path $baseDir ("ApiumSlicerExplorerPreview/Registered/" + [Guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $installDir -ErrorAction Stop | Out-Null
+    $installedDll = Join-Path $installDir "ApiumSlicerExplorerPreview.dll"
+    Copy-Item -LiteralPath $SourcePath -Destination $installedDll -ErrorAction Stop
+    Write-Host "Copied DLL for registration: $installedDll"
+    return (Resolve-Path -LiteralPath $installedDll).Path
+}
+
 function Get-VersionInfoFromInc {
     param([string]$RepoRoot)
 
@@ -181,7 +200,7 @@ function Ensure-KeyAndSetDefault {
         [string]$Path,
         [string]$Value
     )
-    New-Item -Path $Path -Force | Out-Null
+    Ensure-KeyExists -Path $Path
     Set-ItemProperty -Path $Path -Name "(default)" -Value $Value
 }
 
@@ -190,7 +209,7 @@ function Set-OpenWithProgId {
         [string]$Path,
         [string]$ProgId
     )
-    New-Item -Path $Path -Force | Out-Null
+    Ensure-KeyExists -Path $Path
     $regPath = $Path
     if ($regPath.StartsWith("Registry::")) {
         $regPath = $regPath.Substring("Registry::".Length)
@@ -231,13 +250,15 @@ function Resolve-AppOpenCommand {
     }
 
     $knownCommandPaths = @(
+        "Registry::HKEY_CLASSES_ROOT\Apium.Slicer.1\shell\open\command",
+        "Registry::HKEY_CLASSES_ROOT\Applications\apium-slicer.exe\shell\open\command",
         "Registry::HKEY_CLASSES_ROOT\Apium.Slicer.Project.1\shell\open\command",
         "Registry::HKEY_CLASSES_ROOT\ApiumSlicer.GCodeViewer.1\shell\open\command",
         "Registry::HKEY_CLASSES_ROOT\Applications\apium-gcodeviewer.exe\shell\open\command"
     )
     foreach ($path in $knownCommandPaths) {
         $command = Get-DefaultValue -Path $path
-        if ($command) {
+        if ($command -and $command -notmatch '(?i)(^|[\\"/])OpenWith\.exe(?:"|\s|$)') {
             return $command
         }
     }
@@ -309,7 +330,9 @@ function Ensure-KeyExists {
         Ensure-KeyExists -Path $parent
     }
 
-    New-Item -Path $Path -Force | Out-Null
+    # New-Item -Force clears values on existing registry keys. Only create
+    # missing keys; never recreate a key just to ensure it exists.
+    New-Item -Path $Path -ErrorAction Stop | Out-Null
 }
 
 function Remove-StaleApiumBindingsForExtension {
@@ -454,10 +477,16 @@ function Set-HandlerBindingsForExtension {
     )
 
     $extBase = "$ClassesRoot\$Extension"
-    if (Test-PrivateDefaultExtension -Extension $Extension) {
+    # Explorer also resolves previews through the extension's base ProgID.
+    # Supply a fallback when none exists, while preserving existing associations.
+    $existingProgId = Get-DefaultValue -Path $extBase
+    if (-not $existingProgId -and $ClassesRoot -eq "Registry::HKEY_CURRENT_USER\Software\Classes") {
+        $existingProgId = Get-DefaultValue -Path "Registry::HKEY_CLASSES_ROOT\$Extension"
+    }
+    if ((Test-PrivateDefaultExtension -Extension $Extension) -or -not $existingProgId) {
         Ensure-KeyAndSetDefault -Path $extBase -Value $apiumProgId
     } else {
-        New-Item -Path $extBase -Force | Out-Null
+        Ensure-KeyExists -Path $extBase
     }
     Set-OpenWithProgId -Path "$extBase\OpenWithProgids" -ProgId $apiumProgId
 
@@ -513,7 +542,7 @@ function Force-BindApiumHandlers {
     }
 
     if ($PreviewHandlersPath) {
-        New-Item -Path $PreviewHandlersPath -Force | Out-Null
+        Ensure-KeyExists -Path $PreviewHandlersPath
         Set-ItemProperty -Path $PreviewHandlersPath -Name $apiumPreviewClsid -Value "Apium Slicer Preview Handler"
     }
 
@@ -550,7 +579,7 @@ function Ensure-PreviewHandlersEnabled {
     $advancedKey = "Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
     try {
         if (-not (Test-Path -LiteralPath $advancedKey)) {
-            New-Item -Path $advancedKey -Force -ErrorAction Stop | Out-Null
+            Ensure-KeyExists -Path $advancedKey
         }
         New-ItemProperty -Path $advancedKey -Name "ShowPreviewHandlers" -PropertyType DWord -Value 1 -Force -ErrorAction Stop | Out-Null
         Write-Host "Ensured Explorer preview handlers are enabled (ShowPreviewHandlers=1)."
@@ -570,7 +599,7 @@ function Ensure-ApiumApplicationRegistration {
     $softwareRoot = Get-SoftwareRootForClassesRoot -ClassesRoot $ClassesRoot
     $progBase = "$ClassesRoot\$apiumProgId"
 
-    New-Item -Path $progBase -Force | Out-Null
+    Ensure-KeyExists -Path $progBase
     Set-ItemProperty -Path $progBase -Name "(default)" -Value "ApiumSlicer"
     Set-ItemProperty -Path $progBase -Name "FriendlyTypeName" -Value "Apium Slicer File"
 
@@ -581,19 +610,19 @@ function Ensure-ApiumApplicationRegistration {
     Remove-KeyIfExists -Path "$progBase\shellex\PropertyHandler"
 
     $capabilitiesPath = "$softwareRoot\ApiumSlicerExplorerPreview\Capabilities"
-    New-Item -Path $capabilitiesPath -Force | Out-Null
+    Ensure-KeyExists -Path $capabilitiesPath
     Set-ItemProperty -Path $capabilitiesPath -Name "ApplicationName" -Value $apiumApplicationName
     Set-ItemProperty -Path $capabilitiesPath -Name "ApplicationDescription" -Value "Apium Slicer file previews and model files"
 
     $fileAssociationsPath = "$capabilitiesPath\FileAssociations"
-    New-Item -Path $fileAssociationsPath -Force | Out-Null
+    Ensure-KeyExists -Path $fileAssociationsPath
     foreach ($extRaw in $TargetExtensions) {
         $ext = Normalize-Extension -Extension $extRaw
         Set-ItemProperty -Path $fileAssociationsPath -Name $ext -Value $apiumProgId
     }
 
     $registeredApplicationsPath = "$softwareRoot\RegisteredApplications"
-    New-Item -Path $registeredApplicationsPath -Force | Out-Null
+    Ensure-KeyExists -Path $registeredApplicationsPath
     Set-ItemProperty -Path $registeredApplicationsPath -Name $apiumApplicationName -Value $apiumCapabilitiesSubPath
 }
 
@@ -671,9 +700,9 @@ function Write-DefaultAppStatus {
         $hasHash = Test-RegistryValueExists -Path $userChoicePath -Name "Hash"
         $default = Get-EffectiveDefaultProgId -Extension $ext
         $isPrivateDefault = Test-PrivateDefaultExtension -Extension $ext
-        if ($default.ProgId -eq $apiumProgId -and $isPrivateDefault -and -not ($userChoiceLatest -like "AppX*")) {
-            Write-Host "Default app for $ext is Apium ($($default.Source)=$($default.ProgId))."
-        } elseif ($userChoice -eq $apiumProgId -and $hasHash -and -not ($userChoiceLatest -like "AppX*")) {
+        # UserChoiceLatest can retain a historical AppX entry after Windows
+        # Settings has selected Apium, even after that AppX package is removed.
+        if ($default.ProgId -eq $apiumProgId -and ($isPrivateDefault -or ($userChoice -eq $apiumProgId -and $hasHash))) {
             Write-Host "Default app for $ext is Apium ($($default.Source)=$($default.ProgId))."
         } elseif ($userChoice -eq $apiumProgId -and $userChoiceLatest -like "AppX*") {
             Write-Warning "Default app for $ext is mixed (UserChoice=$userChoice, UserChoiceLatest=$userChoiceLatest). If Explorer still uses Microsoft Preview Creator, reselect Apium Slicer in Windows Settings."
@@ -698,7 +727,7 @@ function Set-ApiumComClassValues {
         [bool]$SetAppId
     )
 
-    New-Item -Path $ClsidKey -Force | Out-Null
+    Ensure-KeyExists -Path $ClsidKey
     Set-ItemProperty -Path $ClsidKey -Name "(default)" -Value $Name
     Set-ItemProperty -Path $ClsidKey -Name "DisplayName" -Value $Name
     New-ItemProperty -Path $ClsidKey -Name "AutomaticallyPreviewUntrustedFiles" -PropertyType DWord -Value 1 -Force | Out-Null
@@ -708,7 +737,7 @@ function Set-ApiumComClassValues {
         Set-ItemProperty -Path $ClsidKey -Name "AppID" -Value $previewHostAppId
     }
 
-    New-Item -Path $InprocKey -Force | Out-Null
+    Ensure-KeyExists -Path $InprocKey
     Set-ItemProperty -Path $InprocKey -Name "(default)" -Value $ResolvedDllPath
     Set-ItemProperty -Path $InprocKey -Name "ThreadingModel" -Value "Apartment"
     Set-ItemProperty -Path $InprocKey -Name "ProgID" -Value $apiumProgId
@@ -755,12 +784,12 @@ function Ensure-SystemClassAndPreviewRegistration {
     }
 
     $previewHandlers64 = "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\PreviewHandlers"
-    New-Item -Path $previewHandlers64 -Force | Out-Null
+    Ensure-KeyExists -Path $previewHandlers64
     Set-ItemProperty -Path $previewHandlers64 -Name $apiumPreviewClsid -Value "Apium Slicer Preview Handler"
 
     $previewHandlers32 = "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\PreviewHandlers"
     try {
-        New-Item -Path $previewHandlers32 -Force | Out-Null
+        Ensure-KeyExists -Path $previewHandlers32
         Set-ItemProperty -Path $previewHandlers32 -Name $apiumPreviewClsid -Value "Apium Slicer Preview Handler"
     } catch {
     }
@@ -778,14 +807,14 @@ function Ensure-SystemClassAndPreviewRegistration {
     Write-Host "Ensured HKLM COM, PreviewHandlers, Default Apps registration, and file-type bindings for Apium CLSIDs."
 }
 
-$resolvedDll = Resolve-DllPath -InputPath $DllPath
+$sourceDll = Resolve-DllPath -InputPath $DllPath
+if ($MachineOnly -and -not (Test-IsAdministrator)) {
+    throw "MachineOnly registration requires an elevated PowerShell."
+}
 $openCommand = Resolve-AppOpenCommand -RequestedAppPath $AppPath
+$resolvedDll = Copy-DllForRegistration -SourcePath $sourceDll
 
 if ($MachineOnly) {
-    if (-not (Test-IsAdministrator)) {
-        throw "MachineOnly registration requires an elevated PowerShell."
-    }
-
     if (-not $Soft) {
         foreach ($ext in $legacyRemovedExtensions) {
             Remove-StaleApiumBindingsForExtension -Extension $ext -ClassesRoot "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Classes"
@@ -816,6 +845,11 @@ if ($process.ExitCode -ne 0) {
 }
 
 Assert-ApiumClassRegistration -ResolvedDllPath $resolvedDll
+Ensure-ApiumApplicationRegistration `
+    -ClassesRoot "Registry::HKEY_CURRENT_USER\Software\Classes" `
+    -ResolvedDllPath $resolvedDll `
+    -OpenCommand $openCommand `
+    -TargetExtensions $Extensions
 Write-Host "Registered: $resolvedDll"
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $versionInfo = Get-VersionInfoFromInc -RepoRoot $repoRoot
@@ -846,11 +880,6 @@ if (-not $Soft) {
         -TargetPropertyExtensions $PropertyExtensions `
         -BindForeignProgIds $ForceForeignProgIds
     Remove-KeyIfExists -Path "Registry::HKEY_CURRENT_USER\Software\Classes\AppID\$legacyPreviewHostAppId"
-    Ensure-ApiumApplicationRegistration `
-        -ClassesRoot "Registry::HKEY_CURRENT_USER\Software\Classes" `
-        -ResolvedDllPath $resolvedDll `
-        -OpenCommand $openCommand `
-        -TargetExtensions $Extensions
     Force-BindApiumHandlers -TargetExtensions $Extensions -BindForeignProgIds $ForceForeignProgIds
     Ensure-PropertySystemBindings -TargetExtensions $PropertyExtensions
     Ensure-PreviewHandlersEnabled

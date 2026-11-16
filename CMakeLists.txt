@@ -71,4 +71,10 @@ if (BUILD_TESTING)
     target_compile_definitions(ApiumMetadataTests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
     target_link_libraries(ApiumMetadataTests PRIVATE Ole32 OleAut32 Shlwapi Gdi32 Uuid Windowscodecs Crypt32)
     add_test(NAME ApiumMetadataTests COMMAND ApiumMetadataTests)
+
+    find_program(POWERSHELL_EXECUTABLE NAMES pwsh powershell)
+    if (POWERSHELL_EXECUTABLE)
+        add_test(NAME ApiumRegistrationTests COMMAND "${POWERSHELL_EXECUTABLE}"
+            -NoProfile -File "${CMAKE_SOURCE_DIR}/scripts/test-registration.ps1")
+    endif()
 endif()

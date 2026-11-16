@@ -968,7 +968,9 @@ HRESULT RegisterApiumApplicationPerUser(
     if (FAILED(hr)) {
         return hr;
     }
-    hr = SetRegSz(key, nullptr, BuildOpenWithCommand());
+    if (ReadDefaultRegString(HKEY_CURRENT_USER, openCommandPath).value_or(L"").empty()) {
+        hr = SetRegSz(key, nullptr, BuildOpenWithCommand());
+    }
     RegCloseKey(key);
     if (FAILED(hr)) {
         return hr;
@@ -1071,7 +1073,8 @@ HRESULT RegisterProviderPerUser() {
             if (FAILED(hr)) {
                 return hr;
             }
-            if (IsPrivateDefaultExtension(ext)) {
+            if (IsPrivateDefaultExtension(ext) ||
+                ReadDefaultRegString(HKEY_CLASSES_ROOT, std::wstring(ext)).value_or(L"").empty()) {
                 hr = SetRegSz(key, nullptr, kApiumProgId);
             }
             RegCloseKey(key);
