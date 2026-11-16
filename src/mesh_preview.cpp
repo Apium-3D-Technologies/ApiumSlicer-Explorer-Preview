@@ -601,12 +601,9 @@ std::vector<uint32_t> Downsample2x(const std::vector<uint32_t>& src, UINT dstWid
             g /= 4;
             r /= 4;
             a /= 4;
-            if (a > 0 && a < 255) {
-                const float alphaScale = static_cast<float>(a) / 255.0f;
-                r = static_cast<uint32_t>(std::round(r * alphaScale));
-                g = static_cast<uint32_t>(std::round(g * alphaScale));
-                b = static_cast<uint32_t>(std::round(b * alphaScale));
-            }
+            // Opaque samples and transparent black were averaged together,
+            // so RGB is already premultiplied by coverage. Multiplying again
+            // would create dark fringes around the model.
             dst[static_cast<size_t>(y) * dstWidth + x] = MakeBgra(
                 static_cast<uint8_t>(std::min<uint32_t>(r, 255)),
                 static_cast<uint8_t>(std::min<uint32_t>(g, 255)),

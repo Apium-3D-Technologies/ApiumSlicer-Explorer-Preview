@@ -2,6 +2,7 @@
 
 #include <shlwapi.h>
 #include <shobjidl.h>
+#include <thumbcache.h>
 #include <wrl/client.h>
 
 #include <algorithm>
@@ -107,6 +108,48 @@ BOOL CALLBACK CollectChildText(HWND child, LPARAM data) {
     auto& text = *reinterpret_cast<std::wstring*>(data);
     text += WindowText(child) + L"\n";
     return TRUE;
+}
+
+void CheckThumbnail(HMODULE dll, const std::vector<uint8_t>& bytes) {
+    using GetFactory = HRESULT(__stdcall*)(REFCLSID, REFIID, void**);
+    const auto getFactory = reinterpret_cast<GetFactory>(GetProcAddress(dll, "DllGetClassObject"));
+    CLSID clsid = {};
+    CLSIDFromString(L"{8A14EAA2-3FDB-4C5A-98A1-5D0A8700C8A5}", &clsid);
+    ComPtr<IClassFactory> factory;
+    Check(SUCCEEDED(getFactory(clsid, IID_PPV_ARGS(&factory))), "Thumbnail factory creation failed");
+    ComPtr<IThumbnailProvider> thumbnail;
+    Check(SUCCEEDED(factory->CreateInstance(nullptr, IID_PPV_ARGS(&thumbnail))), "Thumbnail provider creation failed");
+    ComPtr<IInitializeWithStream> init;
+    Check(SUCCEEDED(thumbnail.As(&init)), "Thumbnail stream initializer missing");
+    ComPtr<IStream> stream;
+    stream.Attach(SHCreateMemStream(bytes.data(), static_cast<UINT>(bytes.size())));
+    Check(SUCCEEDED(init->Initialize(stream.Get(), STGM_READ)), "Thumbnail stream initialization failed");
+    HBITMAP bitmap = nullptr;
+    WTS_ALPHATYPE alpha = WTSAT_UNKNOWN;
+    Check(SUCCEEDED(thumbnail->GetThumbnail(96, &bitmap, &alpha)) && bitmap, "Thumbnail rendering failed");
+    try {
+        DIBSECTION dib = {};
+        Check(GetObjectW(bitmap, sizeof(dib), &dib) == sizeof(dib) && dib.dsBm.bmBits && dib.dsBm.bmBitsPixel == 32, "Thumbnail must be a 32-bit DIB");
+        Check(alpha == WTSAT_ARGB, "Thumbnail provider must report an alpha channel");
+        const auto* pixels = static_cast<const uint32_t*>(dib.dsBm.bmBits);
+        Check(pixels[0] == 0 && pixels[dib.dsBm.bmWidth - 1] == 0, "Thumbnail corners must be transparent");
+        size_t transparent = 0, opaque = 0, partial = 0;
+        for (LONG y = 0; y < dib.dsBm.bmHeight; ++y) {
+            const auto* row = reinterpret_cast<const uint32_t*>(static_cast<const uint8_t*>(dib.dsBm.bmBits) + y * dib.dsBm.bmWidthBytes);
+            for (LONG x = 0; x < dib.dsBm.bmWidth; ++x) {
+                const uint32_t p = row[x], a = p >> 24;
+                transparent += a == 0;
+                opaque += a == 255;
+                partial += a > 0 && a < 255;
+                Check((p & 255) <= a && ((p >> 8) & 255) <= a && ((p >> 16) & 255) <= a, "Thumbnail pixels must use premultiplied alpha");
+            }
+        }
+        Check(transparent > 0 && opaque > 0 && partial > 0, "Thumbnail must contain a transparent background, an opaque model and antialiased edges");
+    } catch (...) {
+        DeleteObject(bitmap);
+        throw;
+    }
+    DeleteObject(bitmap);
 }
 
 std::wstring CheckPreview(HMODULE dll, const std::vector<uint8_t>& bytes, const wchar_t* sourcePath = nullptr, bool tetrahedron = false) {
@@ -243,6 +286,9 @@ int wmain(int argc, wchar_t** argv) {
         Check(SUCCEEDED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED)), "COM initialization failed");
         HMODULE dll = LoadLibraryW(argv[1]);
         Check(dll != nullptr, "Cannot load preview DLL");
+        CheckThumbnail(dll, bytes);
+        CheckThumbnail(dll, asciiBytes);
+        CheckThumbnail(dll, objBytes);
         CheckPreview(dll, bytes, nullptr, true);
         CheckPreview(dll, asciiBytes, nullptr, true);
         CheckPreview(dll, objBytes, nullptr, true);
