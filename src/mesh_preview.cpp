@@ -12,6 +12,7 @@
 #include <optional>
 #include <sstream>
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace {
@@ -37,6 +38,8 @@ struct Mesh {
     std::vector<Triangle> triangles;
     size_t vertexCount = 0;
     size_t faceCount = 0;
+    size_t degenerateTriangles = 0;
+    size_t invalidTriangles = 0;
 };
 
 struct Bounds {
@@ -134,13 +137,21 @@ std::optional<Vec3> Normalize(Vec3 v) {
     return Mul(v, 1.0f / len);
 }
 
-bool IsDegenerate(const Triangle& tri) {
-    const Vec3 ab = Sub(tri.b, tri.a);
-    const Vec3 ac = Sub(tri.c, tri.a);
-    return Length(Cross(ab, ac)) <= 1.0e-8f;
+double TriangleArea(const Triangle& tri) {
+    const double abx = static_cast<double>(tri.b.x) - tri.a.x;
+    const double aby = static_cast<double>(tri.b.y) - tri.a.y;
+    const double abz = static_cast<double>(tri.b.z) - tri.a.z;
+    const double acx = static_cast<double>(tri.c.x) - tri.a.x;
+    const double acy = static_cast<double>(tri.c.y) - tri.a.y;
+    const double acz = static_cast<double>(tri.c.z) - tri.a.z;
+    return 0.5 * std::hypot(aby * acz - abz * acy, abz * acx - abx * acz, abx * acy - aby * acx);
 }
 
 VertexKey MakeVertexKey(Vec3 v) {
+    // Both representations of zero describe the same geometric vertex.
+    if (v.x == 0.0f) { v.x = 0.0f; }
+    if (v.y == 0.0f) { v.y = 0.0f; }
+    if (v.z == 0.0f) { v.z = 0.0f; }
     VertexKey key;
     std::memcpy(&key.x, &v.x, sizeof(key.x));
     std::memcpy(&key.y, &v.y, sizeof(key.y));
@@ -194,10 +205,16 @@ Bounds CalculateBounds(const std::vector<Triangle>& triangles) {
 }
 
 bool AddTriangle(Mesh& mesh, Triangle tri) {
-    if (mesh.triangles.size() >= kMaxTriangles) {
+    if (mesh.triangles.size() + mesh.degenerateTriangles + mesh.invalidTriangles >= kMaxTriangles) {
         return false;
     }
-    if (!IsFinite(tri.a) || !IsFinite(tri.b) || !IsFinite(tri.c) || IsDegenerate(tri)) {
+    if (!IsFinite(tri.a) || !IsFinite(tri.b) || !IsFinite(tri.c)) {
+        ++mesh.invalidTriangles;
+        return true;
+    }
+    // Do not use an absolute area threshold: tiny, valid models are not errors.
+    if (TriangleArea(tri) == 0.0) {
+        ++mesh.degenerateTriangles;
         return true;
     }
     mesh.triangles.push_back(tri);
@@ -249,10 +266,10 @@ bool ParseBinaryStl(const std::vector<uint8_t>& bytes, Mesh& mesh, bool strictSi
         ptr += 38;
     }
 
-    if (parsed.triangles.empty()) {
+    if (parsed.triangles.empty() && parsed.degenerateTriangles == 0 && parsed.invalidTriangles == 0) {
         return false;
     }
-    parsed.faceCount = parsed.triangles.size();
+    parsed.faceCount = parsed.triangles.size() + parsed.degenerateTriangles + parsed.invalidTriangles;
     parsed.vertexCount = CountUniqueTriangleVertices(parsed.triangles);
     mesh = std::move(parsed);
     return true;
@@ -328,10 +345,10 @@ bool ParseAsciiStl(const std::vector<uint8_t>& bytes, Mesh& mesh) {
         }
     }
 
-    if (parsed.triangles.empty()) {
+    if (parsed.triangles.empty() && parsed.degenerateTriangles == 0 && parsed.invalidTriangles == 0) {
         return false;
     }
-    parsed.faceCount = parsed.triangles.size();
+    parsed.faceCount = parsed.triangles.size() + parsed.degenerateTriangles + parsed.invalidTriangles;
     parsed.vertexCount = CountUniqueTriangleVertices(parsed.triangles);
     mesh = std::move(parsed);
     return true;
@@ -414,7 +431,7 @@ bool ParseObj(const std::vector<uint8_t>& bytes, Mesh& mesh) {
         }
     }
 
-    if (parsed.triangles.empty()) {
+    if (parsed.triangles.empty() && parsed.degenerateTriangles == 0 && parsed.invalidTriangles == 0) {
         return false;
     }
     parsed.vertexCount = vertices.size();
@@ -706,13 +723,134 @@ std::optional<HBITMAP> RenderMeshToBitmap(const Mesh& mesh, UINT requestedMaxSiz
     return CreateArgbBitmap(size, size, pixels);
 }
 
+void AnalyzeGeometry(MeshPreviewResult& result, const Mesh& mesh) {
+    struct Edge {
+        uint32_t a;
+        uint32_t b;
+        bool operator==(const Edge& other) const { return a == other.a && b == other.b; }
+    };
+    struct EdgeHash {
+        size_t operator()(const Edge& edge) const {
+            return static_cast<size_t>(edge.a) ^ (static_cast<size_t>(edge.b) + 0x9e3779b9u +
+                (static_cast<size_t>(edge.a) << 6) + (edge.a >> 2));
+        }
+    };
+    struct Face {
+        uint32_t a, b, c;
+        bool operator==(const Face& other) const { return a == other.a && b == other.b && c == other.c; }
+    };
+    struct FaceHash {
+        size_t operator()(const Face& face) const {
+            const size_t ab = EdgeHash{}(Edge{face.a, face.b});
+            return ab ^ (static_cast<size_t>(face.c) + 0x9e3779b9u + (ab << 6) + (ab >> 2));
+        }
+    };
+    struct EdgeUse { size_t firstTriangle; unsigned count = 0; int direction = 0; };
+
+    result.degenerateTriangles = mesh.degenerateTriangles;
+    result.invalidTriangles = mesh.invalidTriangles;
+    result.meshErrors = mesh.degenerateTriangles + mesh.invalidTriangles;
+    if (mesh.triangles.empty()) { return; }
+
+    // Intern geometric vertices, including OBJ vertices with different indices
+    // but identical coordinates. Compact IDs keep topology maps small.
+    std::unordered_map<VertexKey, uint32_t, VertexKeyHash> vertices;
+    vertices.reserve(std::min(mesh.vertexCount, mesh.triangles.size() * 3));
+    const auto vertexId = [&](Vec3 vertex) {
+        return vertices.try_emplace(MakeVertexKey(vertex), static_cast<uint32_t>(vertices.size())).first->second;
+    };
+    std::unordered_set<Face, FaceHash> faces;
+    faces.reserve(mesh.triangles.size());
+    std::unordered_map<Edge, EdgeUse, EdgeHash> edges;
+    edges.reserve(mesh.triangles.size() * 3 / 2);
+
+    // A part is a connected group of triangles sharing complete edges.
+    // Negative entries store root sizes; other entries store parent indices.
+    std::vector<int32_t> parents(mesh.triangles.size(), -1);
+    result.parts = mesh.triangles.size();
+    const auto root = [&](size_t index) {
+        size_t current = index;
+        while (parents[current] >= 0) { current = static_cast<size_t>(parents[current]); }
+        while (index != current) {
+            const size_t next = static_cast<size_t>(parents[index]);
+            parents[index] = static_cast<int32_t>(current);
+            index = next;
+        }
+        return current;
+    };
+    const auto join = [&](size_t a, size_t b) {
+        a = root(a);
+        b = root(b);
+        if (a == b) { return; }
+        if (parents[a] > parents[b]) { std::swap(a, b); }
+        parents[a] += parents[b];
+        parents[b] = static_cast<int32_t>(a);
+        --result.parts;
+    };
+    const auto addEdge = [&](uint32_t a, uint32_t b, size_t triangle) {
+        const bool forward = a < b;
+        if (!forward) { std::swap(a, b); }
+        auto [it, inserted] = edges.try_emplace(Edge{a, b}, EdgeUse{triangle});
+        auto& use = it->second;
+        if (!inserted) { join(triangle, use.firstTriangle); }
+        ++use.count;
+        use.direction += forward ? 1 : -1;
+    };
+    const auto addCompensated = [](double value, double& sum, double& correction) {
+        const double adjusted = value - correction;
+        const double next = sum + adjusted;
+        correction = (next - sum) - adjusted;
+        sum = next;
+    };
+
+    // Translate before the determinant to retain precision far from the origin.
+    const Vec3 origin = mesh.triangles.front().a;
+    double volume = 0.0, volumeCorrection = 0.0, areaCorrection = 0.0;
+    for (size_t index = 0; index < mesh.triangles.size(); ++index) {
+        const Triangle& tri = mesh.triangles[index];
+        const uint32_t a = vertexId(tri.a), b = vertexId(tri.b), c = vertexId(tri.c);
+        addEdge(a, b, index);
+        addEdge(b, c, index);
+        addEdge(c, a, index);
+        Face face{a, b, c};
+        if (face.a > face.b) { std::swap(face.a, face.b); }
+        if (face.b > face.c) { std::swap(face.b, face.c); }
+        if (face.a > face.b) { std::swap(face.a, face.b); }
+        if (!faces.insert(face).second) { ++result.duplicateTriangles; }
+        addCompensated(TriangleArea(tri), result.surfaceArea, areaCorrection);
+        const double ax = static_cast<double>(tri.a.x) - origin.x;
+        const double ay = static_cast<double>(tri.a.y) - origin.y;
+        const double az = static_cast<double>(tri.a.z) - origin.z;
+        const double bx = static_cast<double>(tri.b.x) - origin.x;
+        const double by = static_cast<double>(tri.b.y) - origin.y;
+        const double bz = static_cast<double>(tri.b.z) - origin.z;
+        const double cx = static_cast<double>(tri.c.x) - origin.x;
+        const double cy = static_cast<double>(tri.c.y) - origin.y;
+        const double cz = static_cast<double>(tri.c.z) - origin.z;
+        const double term = (ax * (by * cz - bz * cy) + ay * (bz * cx - bx * cz) + az * (bx * cy - by * cx)) / 6.0;
+        addCompensated(term, volume, volumeCorrection);
+    }
+    for (const auto& [edge, use] : edges) {
+        if (use.count == 1) { ++result.boundaryEdges; }
+        else if (use.count > 2) { ++result.nonManifoldEdges; }
+        else if (use.direction != 0) { ++result.inconsistentEdges; }
+    }
+    result.meshErrors += result.duplicateTriangles + result.boundaryEdges +
+        result.nonManifoldEdges + result.inconsistentEdges;
+    if (result.meshErrors == 0 && std::isfinite(volume)) {
+        result.hasVolume = true;
+        result.volume = std::abs(volume);
+    }
+}
+
 void PopulateMeshResult(MeshPreviewResult& result, const Mesh& mesh, std::wstring_view format) {
     result.isMesh = true;
     result.format = std::wstring(format);
-    result.triangles = mesh.triangles.size();
-    result.polygons = mesh.triangles.size();
-    result.faces = mesh.faceCount == 0 ? mesh.triangles.size() : mesh.faceCount;
+    result.triangles = mesh.triangles.size() + mesh.degenerateTriangles + mesh.invalidTriangles;
+    result.polygons = result.triangles;
+    result.faces = mesh.faceCount == 0 ? result.triangles : mesh.faceCount;
     result.vertices = mesh.vertexCount;
+    AnalyzeGeometry(result, mesh);
 
     const Bounds bounds = CalculateBounds(mesh.triangles);
     if (bounds.valid) {

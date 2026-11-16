@@ -72,6 +72,12 @@ if (BUILD_TESTING)
     target_link_libraries(ApiumMetadataTests PRIVATE Ole32 OleAut32 Shlwapi Gdi32 Uuid Windowscodecs Crypt32)
     add_test(NAME ApiumMetadataTests COMMAND ApiumMetadataTests)
 
+    add_executable(ApiumMeshPreviewTests src/mesh_preview_tests.cpp src/mesh_preview.cpp)
+    target_compile_definitions(ApiumMeshPreviewTests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_libraries(ApiumMeshPreviewTests PRIVATE Ole32 Shlwapi User32 Gdi32 Uuid)
+    add_dependencies(ApiumMeshPreviewTests ApiumSlicerExplorerPreview)
+    add_test(NAME ApiumMeshPreviewTests COMMAND ApiumMeshPreviewTests "$<TARGET_FILE:ApiumSlicerExplorerPreview>")
+
     find_program(POWERSHELL_EXECUTABLE NAMES pwsh powershell)
     if (POWERSHELL_EXECUTABLE)
         add_test(NAME ApiumRegistrationTests COMMAND "${POWERSHELL_EXECUTABLE}"

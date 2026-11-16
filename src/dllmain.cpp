@@ -676,7 +676,7 @@ std::vector<PreviewRow> BuildPreviewRows(const ApiumMetadata& metadata) {
 
 std::wstring FileNameFromPath(std::wstring_view path) {
     if (path.empty()) {
-        return L"<stream>";
+        return L"";
     }
     const size_t slashPos = path.find_last_of(L"\\/");
     if (slashPos == std::wstring_view::npos) {
@@ -695,11 +695,11 @@ std::wstring FormatFileSize(size_t bytes) {
     constexpr double kMiB = 1024.0 * 1024.0;
     constexpr double kGiB = 1024.0 * 1024.0 * 1024.0;
     if (bytes >= static_cast<size_t>(kGiB)) {
-        (void)StringCchPrintfW(buffer, std::size(buffer), L"%.2f GB", static_cast<double>(bytes) / kGiB);
+        (void)StringCchPrintfW(buffer, std::size(buffer), L"%.2f GiB", static_cast<double>(bytes) / kGiB);
     } else if (bytes >= static_cast<size_t>(kMiB)) {
-        (void)StringCchPrintfW(buffer, std::size(buffer), L"%.2f MB", static_cast<double>(bytes) / kMiB);
+        (void)StringCchPrintfW(buffer, std::size(buffer), L"%.2f MiB", static_cast<double>(bytes) / kMiB);
     } else if (bytes >= static_cast<size_t>(kKiB)) {
-        (void)StringCchPrintfW(buffer, std::size(buffer), L"%.2f KB", static_cast<double>(bytes) / kKiB);
+        (void)StringCchPrintfW(buffer, std::size(buffer), L"%.2f KiB", static_cast<double>(bytes) / kKiB);
     } else {
         (void)StringCchPrintfW(buffer, std::size(buffer), L"%llu B", static_cast<unsigned long long>(bytes));
     }
@@ -708,6 +708,10 @@ std::wstring FormatFileSize(size_t bytes) {
 
 std::wstring FormatModelNumber(double value) {
     wchar_t buffer[64] = {};
+    if (value > 0.0 && value < 0.001) {
+        (void)StringCchPrintfW(buffer, std::size(buffer), L"%.3g", value);
+        return buffer;
+    }
     (void)StringCchPrintfW(buffer, std::size(buffer), L"%.3f", value);
     std::wstring text(buffer);
     while (text.find(L'.') != std::wstring::npos && !text.empty() && text.back() == L'0') {
@@ -725,34 +729,29 @@ std::wstring FormatDimensions(const MeshPreviewResult& meshInfo) {
     }
     return FormatModelNumber(meshInfo.dimensionX) + L" x " +
            FormatModelNumber(meshInfo.dimensionY) + L" x " +
-           FormatModelNumber(meshInfo.dimensionZ) + L" model units";
+           FormatModelNumber(meshInfo.dimensionZ);
 }
 
-std::wstring FormatLastWriteTime(std::wstring_view path) {
-    if (path.empty()) {
-        return L"n/a";
-    }
+std::wstring FormatModelMeasure(double value, wchar_t exponent) {
+    wchar_t buffer[64] = {};
+    (void)StringCchPrintfW(buffer, std::size(buffer), L"%.1f unit", value);
+    return std::wstring(buffer) + exponent;
+}
 
-    WIN32_FILE_ATTRIBUTE_DATA attributes = {};
-    if (!GetFileAttributesExW(std::wstring(path).c_str(), GetFileExInfoStandard, &attributes)) {
-        return L"n/a";
-    }
-
-    FILETIME localFileTime = {};
-    SYSTEMTIME localTime = {};
-    if (!FileTimeToLocalFileTime(&attributes.ftLastWriteTime, &localFileTime) ||
-        !FileTimeToSystemTime(&localFileTime, &localTime)) {
-        return L"n/a";
-    }
-
-    wchar_t dateBuffer[64] = {};
-    wchar_t timeBuffer[64] = {};
-    if (GetDateFormatW(LOCALE_USER_DEFAULT, DATE_SHORTDATE, &localTime, nullptr, dateBuffer, static_cast<int>(std::size(dateBuffer))) == 0 ||
-        GetTimeFormatW(LOCALE_USER_DEFAULT, TIME_NOSECONDS, &localTime, nullptr, timeBuffer, static_cast<int>(std::size(timeBuffer))) == 0) {
-        return L"n/a";
-    }
-
-    return std::wstring(dateBuffer) + L" " + timeBuffer;
+std::wstring FormatMeshErrors(const MeshPreviewResult& mesh) {
+    std::wstring details;
+    const auto add = [&](std::wstring_view label, size_t count) {
+        if (count == 0) { return; }
+        if (!details.empty()) { details += L"; "; }
+        details += std::wstring(label) + L": " + FormatInteger(count);
+    };
+    add(L"open edges", mesh.boundaryEdges);
+    add(L"non-manifold edges", mesh.nonManifoldEdges);
+    add(L"orientation", mesh.inconsistentEdges);
+    add(L"degenerate triangles", mesh.degenerateTriangles);
+    add(L"duplicate triangles", mesh.duplicateTriangles);
+    add(L"invalid triangles", mesh.invalidTriangles);
+    return FormatInteger(mesh.meshErrors) + (details.empty() ? L"" : L" (" + details + L")");
 }
 
 std::vector<PreviewRow> BuildMeshPreviewRows(
@@ -768,12 +767,15 @@ std::vector<PreviewRow> BuildMeshPreviewRows(
 
     addLine(L"Filename", FileNameFromPath(sourceFilePath));
     addLine(L"Format", meshInfo.format.empty() ? L"n/a" : meshInfo.format);
-    addLine(L"Polygons", FormatInteger(meshInfo.polygons));
-    addLine(L"Faces", FormatInteger(meshInfo.faces));
-    addLine(L"Vertices", FormatInteger(meshInfo.vertices));
-    addLine(L"Dimensions", FormatDimensions(meshInfo));
-    addLine(L"Filesize", FormatFileSize(fileSizeBytes));
-    addLine(L"Last Change", FormatLastWriteTime(sourceFilePath));
+    addLine(L"Volume", meshInfo.hasVolume
+        ? FormatModelMeasure(meshInfo.volume, L'\u00b3')
+        : L"n/a (see mesh errors)");
+    addLine(L"Surface area", FormatModelMeasure(meshInfo.surfaceArea, L'\u00b2'));
+    addLine(L"Size", FormatDimensions(meshInfo));
+    addLine(L"Parts", FormatInteger(meshInfo.parts));
+    addLine(L"Mesh errors", FormatMeshErrors(meshInfo));
+    addLine(L"Triangles", FormatInteger(meshInfo.triangles));
+    addLine(L"File size", FormatFileSize(fileSizeBytes));
     return rows;
 }
 
@@ -1852,8 +1854,7 @@ public:
             return HRESULT_FROM_WIN32(error);
         }
 
-        const std::wstring footer =
-            L"[" + std::wstring(ASXP_NAME_W) + L" - v" + std::wstring(ASXP_VERSION_W) + std::wstring(ASXP_AUTHOR_W) + L"]";
+        const std::wstring footer = L"Apium Preview v" + std::wstring(ASXP_VERSION_W);
         SetWindowTextW(hwndFooter_, footer.c_str());
 
         NONCLIENTMETRICSW metrics = {};
@@ -2292,12 +2293,12 @@ private:
             L"," + std::to_wstring(target.right) + L"," + std::to_wstring(target.bottom) +
             L", size=" + std::to_wstring(width) + L"x" + std::to_wstring(height));
 
-        const int footerHeight = 24;
-        const int imageTop = 8;
+        const int footerHeight = std::min(24, std::max(0, height - 2));
+        const int contentHeight = std::max(1, height - footerHeight);
+        const int imageTop = std::min(8, contentHeight / 4);
         const int imagePadding = 8;
-        const int imageHeight = std::max(120, ((height - imageTop) * 58) / 100);
         const int imageAvailableWidth = std::max(1, width - (imagePadding * 2));
-        const int imageAvailableHeight = std::max(1, imageHeight - imageTop - imagePadding);
+        const int imageAvailableHeight = std::max(1, (contentHeight * 55) / 100 - imageTop);
         const int imageBottomGap = 3;
 
         EnsurePreviewBitmap(static_cast<UINT>(std::min(imageAvailableWidth, imageAvailableHeight)));
@@ -2316,8 +2317,8 @@ private:
         const int imageY = imageTop;
         SetWindowPos(hwndImage_, nullptr, imageX, imageY, renderW, renderH, SWP_NOZORDER | SWP_SHOWWINDOW | SWP_NOACTIVATE);
 
-        const int textTop = std::clamp(imageY + renderH + imageBottomGap, imageHeight, height - 1);
-        const int textBottom = std::max(textTop + 1, height - footerHeight);
+        const int textTop = std::min(imageY + renderH + imageBottomGap, contentHeight - 1);
+        const int textBottom = contentHeight;
         SetWindowPos(hwndText_, nullptr, 0, textTop, width, textBottom - textTop, SWP_NOZORDER | SWP_SHOWWINDOW | SWP_NOACTIVATE);
         SetWindowPos(hwndFooter_, nullptr, 0, textBottom, width, height - textBottom, SWP_NOZORDER | SWP_SHOWWINDOW | SWP_NOACTIVATE);
     }
