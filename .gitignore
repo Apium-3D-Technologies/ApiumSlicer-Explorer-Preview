@@ -33,5 +33,6 @@
 !src/*.rc
 !src/*.hpp
 !src/*.cpp
+!src/*.hlsl
 !src/*.def
 !src/*.h.in

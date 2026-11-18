@@ -162,6 +162,9 @@ std::wstring CheckPreview(HMODULE dll, const std::vector<uint8_t>& bytes, const 
     Check(SUCCEEDED(getFactory(clsid, IID_PPV_ARGS(&factory))), "Preview factory creation failed");
     ComPtr<IPreviewHandler> preview;
     Check(SUCCEEDED(factory->CreateInstance(nullptr, IID_PPV_ARGS(&preview))), "Preview creation failed");
+    ComPtr<IPreviewHandlerVisuals> visuals;
+    Check(SUCCEEDED(preview.As(&visuals)), "Preview visual settings are unavailable");
+    Check(SUCCEEDED(visuals->SetBackgroundColor(RGB(255, 255, 255))), "Setting the light background failed");
     if (sourcePath) {
         ComPtr<IInitializeWithFile> init;
         Check(SUCCEEDED(preview.As(&init)), "Missing file initializer");
@@ -205,16 +208,53 @@ std::wstring CheckPreview(HMODULE dll, const std::vector<uint8_t>& bytes, const 
         RECT imageRect = {};
         Check(image && GetWindowRect(image, &imageRect), "Missing preview image control");
         Check(imageRect.right > imageRect.left && imageRect.bottom > imageRect.top, "Preview image has no size");
+        const HWND viewport = FindWindowExW(image, nullptr, L"ApiumSlicerMeshViewportWindow", nullptr);
+        Check(!viewport || (ASXP_INTERACTIVE_MESH_PREVIEW && expectMesh), "Unexpected Direct3D viewport");
+        if (ASXP_INTERACTIVE_MESH_PREVIEW && tetrahedron && GetEnvironmentVariableW(L"ASXP_TEST_REQUIRE_GPU", nullptr, 0)) {
+            Check(viewport != nullptr, "The Direct3D viewport is required for this run");
+        }
+        if (viewport) {
+            RECT viewportRect = {};
+            Check(GetWindowRect(viewport, &viewportRect) && EqualRect(&viewportRect, &imageRect), "Direct3D viewport must fill the image area");
+            POINT center{(viewportRect.left + viewportRect.right) / 2, (viewportRect.top + viewportRect.bottom) / 2};
+            SendMessageW(viewport, WM_MOUSEWHEEL, MAKEWPARAM(0, WHEEL_DELTA), MAKELPARAM(center.x, center.y));
+            SendMessageW(viewport, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(20, 20));
+            SendMessageW(viewport, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(55, 40));
+            SendMessageW(viewport, WM_LBUTTONUP, 0, MAKELPARAM(55, 40));
+            SendMessageW(viewport, WM_PAINT, 0, 0);
+            Check(IsWindow(viewport), "Direct3D frame failed after mouse input");
+        }
         HWND details = FindWindowExW(pane, nullptr, L"RICHEDIT50W", nullptr);
         if (!details) { details = FindWindowExW(pane, nullptr, L"EDIT", nullptr); }
         HWND footer = FindWindowExW(pane, nullptr, L"STATIC", nullptr);
         RECT detailsRect = {}, footerRect = {}, paneRect = {};
         Check(details && footer && GetWindowRect(details, &detailsRect) && GetWindowRect(footer, &footerRect) && GetWindowRect(pane, &paneRect), "Missing details or footer controls");
+        if (viewport) {
+            Check(imageRect.left == paneRect.left && imageRect.right == paneRect.right && imageRect.top == paneRect.top,
+                "The 3D view must fill the pane width from the top");
+            Check(imageRect.bottom - imageRect.top == imageRect.right - imageRect.left, "The 3D view must be square");
+        }
         Check(detailsRect.top >= imageRect.bottom && footerRect.top >= detailsRect.bottom, "Image, details and version must not overlap");
         Check(footerRect.bottom == paneRect.bottom, "Version footer must stay at the bottom");
+        HDC colorDc = CreateCompatibleDC(nullptr);
+        Check(colorDc != nullptr, "Creating a device context for theme checking failed");
+        SendMessageW(pane, WM_CTLCOLORSTATIC, reinterpret_cast<WPARAM>(colorDc), reinterpret_cast<LPARAM>(footer));
+        const bool lightColors = GetBkColor(colorDc) == RGB(255, 255, 255) && GetTextColor(colorDc) == RGB(0, 0, 0);
+        const HRESULT darkBackground = visuals->SetBackgroundColor(RGB(0x20, 0x20, 0x20));
+        SendMessageW(pane, WM_CTLCOLORSTATIC, reinterpret_cast<WPARAM>(colorDc), reinterpret_cast<LPARAM>(footer));
+        const bool darkColors = GetBkColor(colorDc) == RGB(0x20, 0x20, 0x20) && GetTextColor(colorDc) == RGB(255, 255, 255);
+        DeleteDC(colorDc);
+        Check(lightColors && SUCCEEDED(darkBackground) && darkColors, "Preview colors must follow the light and dark backgrounds");
         for (const auto size : {1L, 16L, 80L}) {
             rect = {0, 0, size, size};
             Check(SUCCEEDED(preview->SetRect(&rect)), "Small preview layout failed");
+            if (viewport) {
+                SendMessageW(viewport, WM_PAINT, 0, 0);
+                Check(IsWindow(viewport), "Direct3D frame failed after resize");
+                Check(GetWindowRect(viewport, &imageRect) && GetWindowRect(details, &detailsRect) &&
+                    imageRect.bottom <= detailsRect.top && detailsRect.bottom > detailsRect.top,
+                    "Short panes must retain room for mesh details");
+            }
         }
         std::wcout << content;
         preview->Unload();

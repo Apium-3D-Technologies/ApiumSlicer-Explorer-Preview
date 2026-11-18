@@ -60,6 +60,38 @@ target_link_libraries(ApiumSlicerExplorerPreview PRIVATE
     Crypt32
 )
 
+option(ASXP_INTERACTIVE_MESH_PREVIEW "Build the Direct3D 11 preview for STL and OBJ files" ON)
+target_compile_definitions(ApiumSlicerExplorerPreview PRIVATE
+    ASXP_INTERACTIVE_MESH_PREVIEW=$<BOOL:${ASXP_INTERACTIVE_MESH_PREVIEW}>)
+if (ASXP_INTERACTIVE_MESH_PREVIEW)
+    get_filename_component(ASXP_RC_DIRECTORY "${CMAKE_RC_COMPILER}" DIRECTORY)
+    set(ASXP_SDK_BIN "$ENV{ProgramFiles\(x86\)}/Windows Kits/10/bin")
+    file(GLOB ASXP_SDK_FXC_DIRECTORIES LIST_DIRECTORIES TRUE "${ASXP_SDK_BIN}/*/x86" "${ASXP_SDK_BIN}/*/x64")
+    list(SORT ASXP_SDK_FXC_DIRECTORIES COMPARE NATURAL ORDER DESCENDING)
+    find_program(ASXP_FXC NAMES fxc HINTS
+        "${ASXP_RC_DIRECTORY}"
+        "$ENV{WindowsSdkVerBinPath}/x86"
+        "${ASXP_SDK_BIN}/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/x86"
+        "${ASXP_SDK_BIN}/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/x64"
+        ${ASXP_SDK_FXC_DIRECTORIES}
+        REQUIRED
+    )
+
+    set(ASXP_MESH_SHADER_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/mesh_viewport.hlsl")
+    foreach(ASXP_SHADER_STAGE IN ITEMS vs ps)
+        set(ASXP_SHADER_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated/mesh_${ASXP_SHADER_STAGE}.h")
+        add_custom_command(OUTPUT "${ASXP_SHADER_HEADER}"
+            COMMAND "${ASXP_FXC}" /nologo /O3 /T "${ASXP_SHADER_STAGE}_4_0" /E "${ASXP_SHADER_STAGE}Main"
+                /Fh "${ASXP_SHADER_HEADER}" /Vn "mesh_${ASXP_SHADER_STAGE}" "${ASXP_MESH_SHADER_SOURCE}"
+            DEPENDS "${ASXP_MESH_SHADER_SOURCE}"
+            VERBATIM
+        )
+        target_sources(ApiumSlicerExplorerPreview PRIVATE "${ASXP_SHADER_HEADER}")
+    endforeach()
+    target_sources(ApiumSlicerExplorerPreview PRIVATE src/mesh_viewport.cpp)
+    target_link_libraries(ApiumSlicerExplorerPreview PRIVATE D3D11 DXGI)
+endif()
+
 include(CTest)
 if (BUILD_TESTING)
     add_executable(ApiumMetadataTests
@@ -73,7 +105,8 @@ if (BUILD_TESTING)
     add_test(NAME ApiumMetadataTests COMMAND ApiumMetadataTests)
 
     add_executable(ApiumMeshPreviewTests src/mesh_preview_tests.cpp src/mesh_preview.cpp)
-    target_compile_definitions(ApiumMeshPreviewTests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_compile_definitions(ApiumMeshPreviewTests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN
+        ASXP_INTERACTIVE_MESH_PREVIEW=$<BOOL:${ASXP_INTERACTIVE_MESH_PREVIEW}>)
     target_link_libraries(ApiumMeshPreviewTests PRIVATE Ole32 Shlwapi User32 Gdi32 Uuid)
     add_dependencies(ApiumMeshPreviewTests ApiumSlicerExplorerPreview)
     add_test(NAME ApiumMeshPreviewTests COMMAND ApiumMeshPreviewTests "$<TARGET_FILE:ApiumSlicerExplorerPreview>")

@@ -22,17 +22,9 @@ constexpr UINT kDefaultPreviewSize = 512;
 constexpr UINT kMaxRenderSize = 2048;
 constexpr int kSupersample = 2;
 
-struct Vec3 {
-    float x = 0.0f;
-    float y = 0.0f;
-    float z = 0.0f;
-};
-
-struct Triangle {
-    Vec3 a;
-    Vec3 b;
-    Vec3 c;
-};
+using Vec3 = MeshPreviewPosition;
+using Triangle = MeshPreviewTriangle;
+using namespace mesh_preview_style;
 
 struct Mesh {
     std::vector<Triangle> triangles;
@@ -159,17 +151,6 @@ VertexKey MakeVertexKey(Vec3 v) {
     return key;
 }
 
-size_t CountUniqueTriangleVertices(const std::vector<Triangle>& triangles) {
-    std::unordered_set<VertexKey, VertexKeyHash> unique;
-    unique.reserve(triangles.size() * 3);
-    for (const Triangle& tri : triangles) {
-        unique.insert(MakeVertexKey(tri.a));
-        unique.insert(MakeVertexKey(tri.b));
-        unique.insert(MakeVertexKey(tri.c));
-    }
-    return unique.size();
-}
-
 Bounds CalculateBounds(const std::vector<Triangle>& triangles) {
     Bounds bounds = {
         {
@@ -270,7 +251,6 @@ bool ParseBinaryStl(const std::vector<uint8_t>& bytes, Mesh& mesh, bool strictSi
         return false;
     }
     parsed.faceCount = parsed.triangles.size() + parsed.degenerateTriangles + parsed.invalidTriangles;
-    parsed.vertexCount = CountUniqueTriangleVertices(parsed.triangles);
     mesh = std::move(parsed);
     return true;
 }
@@ -349,7 +329,6 @@ bool ParseAsciiStl(const std::vector<uint8_t>& bytes, Mesh& mesh) {
         return false;
     }
     parsed.faceCount = parsed.triangles.size() + parsed.degenerateTriangles + parsed.invalidTriangles;
-    parsed.vertexCount = CountUniqueTriangleVertices(parsed.triangles);
     mesh = std::move(parsed);
     return true;
 }
@@ -543,14 +522,11 @@ void RasterizeTriangle(
         return;
     }
 
-    const uint8_t baseR = 0xD7;
-    const uint8_t baseG = 0x19;
-    const uint8_t baseB = 0x20;
-    const float shade = std::clamp(tri.shade, 0.18f, 1.0f);
+    const float shade = std::clamp(tri.shade, kMinShade, 1.0f);
     const uint32_t color = MakeBgra(
-        static_cast<uint8_t>(std::clamp(baseR * shade, 0.0f, 255.0f)),
-        static_cast<uint8_t>(std::clamp(baseG * shade, 0.0f, 255.0f)),
-        static_cast<uint8_t>(std::clamp(baseB * shade, 0.0f, 255.0f)),
+        static_cast<uint8_t>(GetRValue(kModelColor) * shade),
+        static_cast<uint8_t>(GetGValue(kModelColor) * shade),
+        static_cast<uint8_t>(GetBValue(kModelColor) * shade),
         255);
 
     for (int y = minY; y <= maxY; ++y) {
@@ -614,8 +590,9 @@ std::vector<uint32_t> Downsample2x(const std::vector<uint32_t>& src, UINT dstWid
     return dst;
 }
 
-std::optional<HBITMAP> RenderMeshToBitmap(const Mesh& mesh, UINT requestedMaxSize) {
-    if (mesh.triangles.empty()) {
+std::optional<HBITMAP> RenderMeshToBitmap(
+    const std::vector<Triangle>& triangles, Vec3 minBounds, Vec3 maxBounds, UINT requestedMaxSize) {
+    if (triangles.empty()) {
         return std::nullopt;
     }
 
@@ -624,38 +601,12 @@ std::optional<HBITMAP> RenderMeshToBitmap(const Mesh& mesh, UINT requestedMaxSiz
     const UINT renderWidth = size * kSupersample;
     const UINT renderHeight = size * kSupersample;
 
-    Vec3 minBounds = {
-        std::numeric_limits<float>::max(),
-        std::numeric_limits<float>::max(),
-        std::numeric_limits<float>::max(),
-    };
-    Vec3 maxBounds = {
-        std::numeric_limits<float>::lowest(),
-        std::numeric_limits<float>::lowest(),
-        std::numeric_limits<float>::lowest(),
-    };
-
-    auto include = [&](Vec3 v) {
-        minBounds.x = std::min(minBounds.x, v.x);
-        minBounds.y = std::min(minBounds.y, v.y);
-        minBounds.z = std::min(minBounds.z, v.z);
-        maxBounds.x = std::max(maxBounds.x, v.x);
-        maxBounds.y = std::max(maxBounds.y, v.y);
-        maxBounds.z = std::max(maxBounds.z, v.z);
-    };
-
-    for (const Triangle& tri : mesh.triangles) {
-        include(tri.a);
-        include(tri.b);
-        include(tri.c);
-    }
-
     const Vec3 center = Mul(Add(minBounds, maxBounds), 0.5f);
-    const Vec3 view = Normalize({1.0f, -1.0f, 0.72f}).value();
+    const Vec3 view = Normalize(kViewDirection).value();
     const Vec3 worldUp = {0.0f, 0.0f, 1.0f};
     Vec3 right = Normalize(Cross(worldUp, view)).value_or(Vec3{1.0f, 0.0f, 0.0f});
     Vec3 up = Normalize(Cross(view, right)).value_or(Vec3{0.0f, 1.0f, 0.0f});
-    const Vec3 lightDir = Normalize({-0.35f, -0.45f, 0.82f}).value();
+    const Vec3 lightDir = Normalize(kLightDirection).value();
 
     float minU = std::numeric_limits<float>::max();
     float maxU = std::numeric_limits<float>::lowest();
@@ -672,7 +623,7 @@ std::optional<HBITMAP> RenderMeshToBitmap(const Mesh& mesh, UINT requestedMaxSiz
         maxV = std::max(maxV, v);
     };
 
-    for (const Triangle& tri : mesh.triangles) {
+    for (const Triangle& tri : triangles) {
         boundsProject(tri.a);
         boundsProject(tri.b);
         boundsProject(tri.c);
@@ -680,8 +631,7 @@ std::optional<HBITMAP> RenderMeshToBitmap(const Mesh& mesh, UINT requestedMaxSiz
 
     const float spanU = std::max(maxU - minU, 1.0e-4f);
     const float spanV = std::max(maxV - minV, 1.0e-4f);
-    const float padding = 0.88f;
-    const float scale = padding * std::min(
+    const float scale = kFit * std::min(
         static_cast<float>(renderWidth - 1) / spanU,
         static_cast<float>(renderHeight - 1) / spanV);
     const float centerU = (minU + maxU) * 0.5f;
@@ -699,14 +649,14 @@ std::optional<HBITMAP> RenderMeshToBitmap(const Mesh& mesh, UINT requestedMaxSiz
         y = (static_cast<float>(renderHeight) * 0.5f) - ((v - centerV) * scale);
     };
 
-    for (const Triangle& tri : mesh.triangles) {
+    for (const Triangle& tri : triangles) {
         const auto normal = Normalize(Cross(Sub(tri.b, tri.a), Sub(tri.c, tri.a)));
         if (!normal.has_value()) {
             continue;
         }
         const float diffuse = std::fabs(Dot(normal.value(), lightDir));
-        const float facing = 0.15f + (0.15f * std::fabs(Dot(normal.value(), view)));
-        const float shade = std::clamp(0.26f + (0.62f * diffuse) + facing, 0.18f, 1.0f);
+        const float facing = kFacing + (kFacing * std::fabs(Dot(normal.value(), view)));
+        const float shade = std::clamp(kAmbient + (kDiffuse * diffuse) + facing, kMinShade, 1.0f);
 
         ProjectedTriangle projected;
         project(tri.a, projected.x0, projected.y0, projected.z0);
@@ -752,7 +702,7 @@ void AnalyzeGeometry(MeshPreviewResult& result, const Mesh& mesh) {
     // Intern geometric vertices, including OBJ vertices with different indices
     // but identical coordinates. Compact IDs keep topology maps small.
     std::unordered_map<VertexKey, uint32_t, VertexKeyHash> vertices;
-    vertices.reserve(std::min(mesh.vertexCount, mesh.triangles.size() * 3));
+    vertices.reserve(mesh.vertexCount == 0 ? mesh.triangles.size() : std::min(mesh.vertexCount, mesh.triangles.size() * 3));
     const auto vertexId = [&](Vec3 vertex) {
         return vertices.try_emplace(MakeVertexKey(vertex), static_cast<uint32_t>(vertices.size())).first->second;
     };
@@ -827,6 +777,9 @@ void AnalyzeGeometry(MeshPreviewResult& result, const Mesh& mesh) {
         const double term = (ax * (by * cz - bz * cy) + ay * (bz * cx - bx * cz) + az * (bx * cy - by * cx)) / 6.0;
         addCompensated(term, volume, volumeCorrection);
     }
+    if (mesh.vertexCount == 0) {
+        result.vertices = vertices.size();
+    }
     for (const auto& [edge, use] : edges) {
         if (use.count == 1) { ++result.boundaryEdges; }
         else if (use.count > 2) { ++result.nonManifoldEdges; }
@@ -840,7 +793,7 @@ void AnalyzeGeometry(MeshPreviewResult& result, const Mesh& mesh) {
     }
 }
 
-void PopulateMeshResult(MeshPreviewResult& result, const Mesh& mesh, std::wstring_view format) {
+void PopulateMeshResult(MeshPreviewResult& result, const Mesh& mesh, const Bounds& bounds, std::wstring_view format) {
     result.isMesh = true;
     result.format = std::wstring(format);
     result.triangles = mesh.triangles.size() + mesh.degenerateTriangles + mesh.invalidTriangles;
@@ -849,7 +802,6 @@ void PopulateMeshResult(MeshPreviewResult& result, const Mesh& mesh, std::wstrin
     result.vertices = mesh.vertexCount;
     AnalyzeGeometry(result, mesh);
 
-    const Bounds bounds = CalculateBounds(mesh.triangles);
     if (bounds.valid) {
         result.hasDimensions = true;
         result.dimensionX = static_cast<double>(bounds.max.x) - static_cast<double>(bounds.min.x);
@@ -871,18 +823,30 @@ bool IsMeshPreviewExtension(std::wstring_view pathOrExtension) {
 
 MeshPreviewResult AnalyzeMeshPreview(
     const std::vector<uint8_t>& fileBytes,
-    std::wstring_view pathHint) {
+    std::wstring_view pathHint,
+    MeshPreviewGeometry* geometry) {
     MeshPreviewResult result;
     Mesh mesh;
     std::wstring format;
     if (!ParseMesh(fileBytes, pathHint, mesh, format)) {
+        if (geometry) {
+            *geometry = {};
+        }
         result.status = L"mesh parse failed";
         return result;
     }
 
-    PopulateMeshResult(result, mesh, format);
+    const Bounds bounds = CalculateBounds(mesh.triangles);
+    PopulateMeshResult(result, mesh, bounds, format);
+    if (geometry) {
+        *geometry = {std::move(mesh.triangles), bounds.min, bounds.max};
+    }
     result.status = L"ok";
     return result;
+}
+
+HBITMAP RenderMeshPreviewBitmap(const MeshPreviewGeometry& geometry, UINT requestedMaxSize) {
+    return RenderMeshToBitmap(geometry.triangles, geometry.min, geometry.max, requestedMaxSize).value_or(nullptr);
 }
 
 MeshPreviewResult RenderMeshPreviewToHBitmap(
@@ -906,8 +870,9 @@ MeshPreviewResult RenderMeshPreviewToHBitmap(
         return result;
     }
 
-    PopulateMeshResult(result, mesh, format);
-    const auto bitmap = RenderMeshToBitmap(mesh, requestedMaxSize);
+    const Bounds bounds = CalculateBounds(mesh.triangles);
+    PopulateMeshResult(result, mesh, bounds, format);
+    const auto bitmap = RenderMeshToBitmap(mesh.triangles, bounds.min, bounds.max, requestedMaxSize);
     if (!bitmap.has_value()) {
         result.status = L"mesh render failed";
         return result;

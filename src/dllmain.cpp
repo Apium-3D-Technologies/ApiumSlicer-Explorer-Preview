@@ -30,8 +30,15 @@
 #include "metadata.hpp"
 #include "generated/apium_version.h"
 
+
 // Show debug information in preview
 //#define SHOW_DEBUG
+
+// CMake defines ASXP_INTERACTIVE_MESH_PREVIEW as 0 or 1.
+#if ASXP_INTERACTIVE_MESH_PREVIEW
+#include <windowsx.h>
+#include "mesh_viewport.hpp"
+#endif
 
 using Microsoft::WRL::ComPtr;
 
@@ -43,6 +50,10 @@ constexpr std::wstring_view kPreviewHostAppId = L"{6d2b5079-2f0b-48dd-ab7f-97cec
 constexpr std::wstring_view kLegacyPreviewHostAppId = L"{3B0FE91D-45E1-41E4-A6A7-6F8045AEF35A}";
 constexpr wchar_t kPreviewPaneWindowClassName[] = L"ApiumSlicerPreviewPaneWindow";
 constexpr wchar_t kPreviewImageWindowClassName[] = L"ApiumSlicerPreviewImageWindow";
+#if ASXP_INTERACTIVE_MESH_PREVIEW
+constexpr wchar_t kMeshViewportWindowClassName[] = L"ApiumSlicerMeshViewportWindow";
+constexpr UINT_PTR kMeshPresentRetryTimer = 1;
+#endif
 
 // {8A14EAA2-3FDB-4C5A-98A1-5D0A8700C8A5}
 const CLSID CLSID_ApiumSlicerThumbnailProvider = {
@@ -1519,14 +1530,10 @@ public:
     }
 
     IFACEMETHODIMP SetBackgroundColor(COLORREF color) override {
-        backgroundColor_ = color;
-        backgroundBrush_.reset(CreateSolidBrush(backgroundColor_));
+        hostBackgroundColor_ = color;
+        RefreshSystemColors();
         if (hwndPreview_) {
             InvalidateRect(hwndPreview_, nullptr, TRUE);
-        }
-        if (hwndText_) {
-            SendMessageW(hwndText_, EM_SETBKGNDCOLOR, 0, static_cast<LPARAM>(backgroundColor_));
-            RenderPreviewContent();
         }
         DebugLogWin(L"PreviewHandlerVisuals SetBackgroundColor");
         return S_OK;
@@ -1552,13 +1559,8 @@ public:
     }
 
     IFACEMETHODIMP SetTextColor(COLORREF color) override {
-        textColor_ = color;
-        if (hwndText_) {
-            RenderPreviewContent();
-        }
-        if (hwndFooter_) {
-            InvalidateRect(hwndFooter_, nullptr, TRUE);
-        }
+        hostTextColor_ = color;
+        RefreshSystemColors();
         DebugLogWin(L"PreviewHandlerVisuals SetTextColor");
         return S_OK;
     }
@@ -1577,7 +1579,6 @@ public:
             DebugLogWin(L"PreviewHandler Initialize(IShellItem): GetDisplayName(SIGDN_FILESYSPATH) failed, hr=" + HResultToString(displayNameHr));
             initPath_ = L"IShellItem";
             sourceFilePath_.clear();
-            fileBytes_.clear();
             metadata_ = ApiumMetadata{};
             metadata_.diagnostics.container = L"unknown";
             metadata_.diagnostics.configPartStatus = L"shell item path unavailable";
@@ -1591,9 +1592,10 @@ public:
         std::wstring path(filePath);
         CoTaskMemFree(filePath);
 
-        if (!ReadPreviewFile(path.c_str(), fileBytes_, metadata_)) {
+        std::vector<uint8_t> fileBytes;
+        if (!ReadPreviewFile(path.c_str(), fileBytes, metadata_)) {
             DebugLogWin(L"PreviewHandler Initialize(IShellItem): ReadPreviewFile failed for " + path);
-            fileBytes_.clear();
+            fileBytes.clear();
             metadata_ = ApiumMetadata{};
             metadata_.diagnostics.container = L"unknown";
             metadata_.diagnostics.configPartStatus = L"shell item file read failed";
@@ -1604,8 +1606,7 @@ public:
 
         initPath_ = L"IShellItem";
         sourceFilePath_ = std::move(path);
-        knownMeshFile_ = IsMeshPreviewExtension(sourceFilePath_);
-        meshInfo_ = knownMeshFile_ ? AnalyzeMeshPreview(fileBytes_, sourceFilePath_) : MeshPreviewResult{};
+        LoadMeshInfo(fileBytes);
         initialized_ = true;
         DebugLogWin(
             L"PreviewHandler Initialize(IShellItem): host=" + hostProcessName_ +
@@ -1634,9 +1635,10 @@ public:
         if (!stream) {
             return E_INVALIDARG;
         }
-        if (!ReadPreviewStream(stream, fileBytes_, metadata_)) {
+        std::vector<uint8_t> fileBytes;
+        if (!ReadPreviewStream(stream, fileBytes, metadata_)) {
             DebugLogWin(L"PreviewHandler Initialize(IStream): ReadPreviewStream failed");
-            fileBytes_.clear();
+            fileBytes.clear();
             metadata_ = ApiumMetadata{};
             metadata_.diagnostics.container = L"unknown";
             metadata_.diagnostics.configPartStatus = L"stream read failed";
@@ -1646,8 +1648,7 @@ public:
         }
         initPath_ = L"IStream";
         sourceFilePath_.clear();
-        meshInfo_ = AnalyzeMeshPreview(fileBytes_, L"");
-        knownMeshFile_ = meshInfo_.isMesh;
+        LoadMeshInfo(fileBytes);
         initialized_ = true;
         DebugLogWin(
             L"PreviewHandler Initialize(IStream): host=" + hostProcessName_ +
@@ -1664,9 +1665,10 @@ public:
         if (!filePath) {
             return E_INVALIDARG;
         }
-        if (!ReadPreviewFile(filePath, fileBytes_, metadata_)) {
+        std::vector<uint8_t> fileBytes;
+        if (!ReadPreviewFile(filePath, fileBytes, metadata_)) {
             DebugLogWin(L"PreviewHandler Initialize(IFile): ReadPreviewFile failed");
-            fileBytes_.clear();
+            fileBytes.clear();
             metadata_ = ApiumMetadata{};
             metadata_.diagnostics.container = L"unknown";
             metadata_.diagnostics.configPartStatus = L"file read failed";
@@ -1676,8 +1678,7 @@ public:
         }
         initPath_ = L"IFile";
         sourceFilePath_ = filePath;
-        knownMeshFile_ = IsMeshPreviewExtension(sourceFilePath_);
-        meshInfo_ = knownMeshFile_ ? AnalyzeMeshPreview(fileBytes_, sourceFilePath_) : MeshPreviewResult{};
+        LoadMeshInfo(fileBytes);
         initialized_ = true;
         DebugLogWin(
             L"PreviewHandler Initialize(IFile): host=" + hostProcessName_ +
@@ -1783,7 +1784,7 @@ public:
             0,
             kPreviewImageWindowClassName,
             nullptr,
-            WS_CHILD | WS_VISIBLE,
+            WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN,
             0,
             0,
             10,
@@ -1891,10 +1892,11 @@ public:
             std::to_wstring(reinterpret_cast<uintptr_t>(hwndPreview_)));
         CleanupWindow();
         initialized_ = false;
-        fileBytes_.clear();
+        sourceFileSize_ = 0;
         metadata_ = ApiumMetadata{};
         sourceFilePath_.clear();
         meshInfo_ = MeshPreviewResult{};
+        meshGeometry_ = {};
         knownMeshFile_ = false;
         return S_OK;
     }
@@ -1955,6 +1957,15 @@ public:
     }
 
 private:
+    void LoadMeshInfo(const std::vector<uint8_t>& fileBytes) {
+        sourceFileSize_ = fileBytes.size();
+        knownMeshFile_ = IsMeshPreviewExtension(sourceFilePath_);
+        if (knownMeshFile_ || sourceFilePath_.empty()) {
+            meshInfo_ = AnalyzeMeshPreview(fileBytes, sourceFilePath_, &meshGeometry_);
+            knownMeshFile_ = knownMeshFile_ || meshInfo_.isMesh;
+        }
+    }
+
     struct DeleteObjectDeleter {
         void operator()(HGDIOBJ obj) const {
             if (obj) {
@@ -1963,37 +1974,22 @@ private:
         }
     };
 
+    static ATOM RegisterPreviewWindowClass(const wchar_t* name, WNDPROC proc) {
+        WNDCLASSW wc = {};
+        wc.lpfnWndProc = proc;
+        wc.hInstance = g_module;
+        wc.lpszClassName = name;
+        const ATOM atom = RegisterClassW(&wc);
+        return atom == 0 && GetLastError() == ERROR_CLASS_ALREADY_EXISTS ? 1 : atom;
+    }
+
     static ATOM EnsurePreviewPaneClass() {
-        static std::once_flag once;
-        static ATOM atom = 0;
-        std::call_once(once, []() {
-            WNDCLASSW wc = {};
-            wc.lpfnWndProc = &PreviewPaneWndProc;
-            wc.hInstance = g_module;
-            wc.hbrBackground = nullptr;
-            wc.lpszClassName = kPreviewPaneWindowClassName;
-            atom = RegisterClassW(&wc);
-            if (atom == 0 && GetLastError() == ERROR_CLASS_ALREADY_EXISTS) {
-                atom = 1;
-            }
-        });
+        static const ATOM atom = RegisterPreviewWindowClass(kPreviewPaneWindowClassName, PreviewPaneWndProc);
         return atom;
     }
 
     static ATOM EnsurePreviewImageClass() {
-        static std::once_flag once;
-        static ATOM atom = 0;
-        std::call_once(once, []() {
-            WNDCLASSW wc = {};
-            wc.lpfnWndProc = &PreviewImageWndProc;
-            wc.hInstance = g_module;
-            wc.hbrBackground = nullptr;
-            wc.lpszClassName = kPreviewImageWindowClassName;
-            atom = RegisterClassW(&wc);
-            if (atom == 0 && GetLastError() == ERROR_CLASS_ALREADY_EXISTS) {
-                atom = 1;
-            }
-        });
+        static const ATOM atom = RegisterPreviewWindowClass(kPreviewImageWindowClassName, PreviewImageWndProc);
         return atom;
     }
 
@@ -2049,6 +2045,145 @@ private:
 
         return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
+
+#if ASXP_INTERACTIVE_MESH_PREVIEW
+    static LRESULT CALLBACK MeshViewportWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+        auto* self = reinterpret_cast<PreviewHandler*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (msg == WM_NCCREATE) {
+            const auto* create = reinterpret_cast<const CREATESTRUCTW*>(lParam);
+            self = static_cast<PreviewHandler*>(create->lpCreateParams);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        }
+        if (!self || !self->meshViewport_) {
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
+        }
+
+        switch (msg) {
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_PAINT:
+            self->PaintMeshViewport(hwnd);
+            return 0;
+        case WM_SIZE:
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        case WM_TIMER:
+            if (wParam == kMeshPresentRetryTimer) {
+                KillTimer(hwnd, kMeshPresentRetryTimer);
+                self->meshPresentRetryPending_ = false;
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
+            break;
+        case WM_LBUTTONDOWN:
+            ::SetFocus(hwnd);
+            SetCapture(hwnd);
+            self->draggingMesh_ = GetCapture() == hwnd;
+            self->lastMeshDrag_ = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            return 0;
+        case WM_MOUSEMOVE:
+            if (self->draggingMesh_) {
+                const POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+                if (point.x != self->lastMeshDrag_.x || point.y != self->lastMeshDrag_.y) {
+                    self->meshViewport_->Rotate(point.x - self->lastMeshDrag_.x, point.y - self->lastMeshDrag_.y);
+                    self->lastMeshDrag_ = point;
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                }
+                return 0;
+            }
+            break;
+        case WM_LBUTTONUP:
+        case WM_CANCELMODE:
+            if (GetCapture() == hwnd) {
+                ReleaseCapture();
+            }
+            return 0;
+        case WM_CAPTURECHANGED:
+            self->draggingMesh_ = false;
+            return 0;
+        case WM_MOUSEWHEEL: {
+            RECT area = {};
+            GetWindowRect(hwnd, &area);
+            if (PtInRect(&area, {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)})) {
+                if (self->meshViewport_->Zoom(GET_WHEEL_DELTA_WPARAM(wParam))) {
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                }
+                return 0;
+            }
+            break;
+        }
+        case WM_SETCURSOR:
+            if (LOWORD(lParam) == HTCLIENT) {
+                static const HCURSOR hand = LoadCursorW(nullptr, IDC_HAND);
+                SetCursor(hand);
+                return TRUE;
+            }
+            break;
+        }
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    bool EnsureMeshViewport(UINT size) {
+        if (meshViewport_) {
+            return true;
+        }
+        if (meshViewportFailed_ || meshGeometry_.triangles.empty()) {
+            return false;
+        }
+
+        static const ATOM atom = RegisterPreviewWindowClass(kMeshViewportWindowClassName, MeshViewportWndProc);
+        if (atom) {
+            hwndMeshViewport_ = CreateWindowExW(0, kMeshViewportWindowClassName, nullptr, WS_CHILD,
+                0, 0, size, size, hwndImage_, nullptr, g_module, this);
+        }
+        HRESULT hr = E_FAIL;
+        if (hwndMeshViewport_) {
+            auto viewport = std::unique_ptr<MeshViewport>(new (std::nothrow) MeshViewport());
+            hr = viewport ? viewport->Initialize(hwndMeshViewport_, size, size, meshGeometry_) : E_OUTOFMEMORY;
+            if (SUCCEEDED(hr)) {
+                meshViewport_ = std::move(viewport);
+                return true;
+            }
+        }
+        DebugLogWin(L"PreviewHandler: Direct3D mesh initialization failed, hr=" + HResultToString(hr));
+        DestroyMeshViewport();
+        meshViewportFailed_ = true;
+        return false;
+    }
+
+    void PaintMeshViewport(HWND hwnd) {
+        PAINTSTRUCT paint = {};
+        BeginPaint(hwnd, &paint);
+        EndPaint(hwnd, &paint);
+        if (meshPresentRetryPending_) {
+            return;
+        }
+        RECT area = {};
+        GetClientRect(hwnd, &area);
+        const HRESULT hr = meshViewport_->Render(area.right, area.bottom, backgroundColor_);
+        if (hr == DXGI_ERROR_WAS_STILL_DRAWING) {
+            meshPresentRetryPending_ = SetTimer(hwnd, kMeshPresentRetryTimer, 16, nullptr) != 0;
+        } else if (FAILED(hr)) {
+            DebugLogWin(L"PreviewHandler: Direct3D mesh render failed, hr=" + HResultToString(hr));
+            DestroyMeshViewport();
+            meshViewportFailed_ = true;
+            Layout();
+        }
+    }
+
+    void DestroyMeshViewport() {
+        if (hwndMeshViewport_) {
+            if (GetCapture() == hwndMeshViewport_) {
+                ReleaseCapture();
+            }
+            meshViewport_.reset();
+            DestroyWindow(hwndMeshViewport_);
+            hwndMeshViewport_ = nullptr;
+        }
+        draggingMesh_ = false;
+        meshPresentRetryPending_ = false;
+    }
+#endif
 
     HBRUSH OnCtlColor(HDC hdc, HWND) {
         if (!backgroundBrush_) {
@@ -2113,15 +2248,20 @@ private:
     }
 
     void RefreshSystemColors() {
-        if (IsAppsDarkModeEnabled()) {
-            backgroundColor_ = RGB(0x19, 0x19, 0x19);
-            textColor_ = RGB(0xFF, 0xFF, 0xFF);
-        } else {
-            backgroundColor_ = RGB(0xFF, 0xFF, 0xFF);
-            textColor_ = RGB(0x00, 0x00, 0x00);
+        constexpr COLORREF light = RGB(255, 255, 255);
+        const bool explorerHost = _wcsicmp(hostProcessName_.c_str(), L"prevhost.exe") == 0;
+        const COLORREF dark = explorerHost ? RGB(0x20, 0x20, 0x20) : RGB(0x19, 0x19, 0x19);
+        const bool darkMode = IsAppsDarkModeEnabled();
+        backgroundColor_ = hostBackgroundColor_.value_or(darkMode ? dark : light);
+        // Explorer's Preview Host can pass white even when the shell uses dark mode.
+        const bool useExplorerDarkPalette = explorerHost && darkMode && backgroundColor_ == light;
+        if (useExplorerDarkPalette) {
+            backgroundColor_ = dark;
         }
-        if (backgroundColor_ == RGB(0xFF, 0xFF, 0xFF)) {
-            textColor_ = RGB(0x00, 0x00, 0x00);
+        const int brightness = 299 * GetRValue(backgroundColor_) + 587 * GetGValue(backgroundColor_) + 114 * GetBValue(backgroundColor_);
+        textColor_ = brightness < 128000 ? light : RGB(0, 0, 0);
+        if (!useExplorerDarkPalette && hostTextColor_ && *hostTextColor_ != backgroundColor_) {
+            textColor_ = *hostTextColor_;
         }
         backgroundBrush_.reset(CreateSolidBrush(backgroundColor_));
         if (hwndText_) {
@@ -2135,15 +2275,22 @@ private:
         if (hwndImage_) {
             InvalidateRect(hwndImage_, nullptr, TRUE);
         }
+#if ASXP_INTERACTIVE_MESH_PREVIEW
+        if (hwndMeshViewport_) {
+            InvalidateRect(hwndMeshViewport_, nullptr, FALSE);
+        }
+#endif
     }
 
     void CleanupWindow() {
+#if ASXP_INTERACTIVE_MESH_PREVIEW
+        DestroyMeshViewport();
+        meshViewportFailed_ = false;
+#endif
         bitmap_.reset();
         bitmapPixelWidth_ = 0;
         bitmapPixelHeight_ = 0;
-        meshPreviewMode_ = false;
-        meshPreviewFailed_ = false;
-        meshInfo_ = MeshPreviewResult{};
+        meshBitmapSize_ = 0;
         if (hwndText_) {
             DestroyWindow(hwndText_);
             hwndText_ = nullptr;
@@ -2172,7 +2319,7 @@ private:
         }
 
         std::vector<PreviewRow> rows = knownMeshFile_
-            ? BuildMeshPreviewRows(meshInfo_, sourceFilePath_, fileBytes_.size())
+            ? BuildMeshPreviewRows(meshInfo_, sourceFilePath_, sourceFileSize_)
             : BuildPreviewRows(metadata_);
         std::vector<std::wstring> extraLines;
         if (knownMeshFile_) {
@@ -2217,39 +2364,22 @@ private:
         }
 
         HBITMAP nextBitmap = nullptr;
-        if (knownMeshFile_ || sourceFilePath_.empty()) {
-            MeshPreviewResult meshResult = RenderMeshPreviewToHBitmap(fileBytes_, sourceFilePath_, maxSize, &nextBitmap);
-            if (meshResult.rendered && nextBitmap) {
-                knownMeshFile_ = true;
-                meshInfo_ = meshResult;
-                meshPreviewMode_ = true;
-                meshPreviewFailed_ = false;
-                DebugLogWin(
-                    L"PreviewHandler EnsurePreviewBitmap: mesh rendered, format=" + meshResult.format +
-                    L", polygons=" + std::to_wstring(meshResult.polygons) +
-                    L", size=" + std::to_wstring(maxSize));
-                RenderPreviewContent();
-            } else if (knownMeshFile_) {
-                meshPreviewMode_ = true;
-                meshPreviewFailed_ = true;
-                DebugLogWin(
-                    L"PreviewHandler EnsurePreviewBitmap: mesh render failed, status=" + meshResult.status +
-                    L", file=" + (sourceFilePath_.empty() ? std::wstring(L"<stream>") : sourceFilePath_));
-                bitmap_.reset();
-                bitmapPixelWidth_ = 0;
-                bitmapPixelHeight_ = 0;
-                InvalidateRect(hwndImage_, nullptr, TRUE);
+        if (knownMeshFile_) {
+            if (meshGeometry_.triangles.empty() || meshBitmapSize_ == maxSize) {
                 return;
             }
-        }
-
-        std::vector<uint8_t> png = metadata_.thumbnailBytes;
-        if (!nextBitmap && png.empty()) {
-            (void)LoadFallbackPng(g_module, png);
-        }
-
-        if (!nextBitmap && !png.empty()) {
-            (void)DecodePngToHBitmap(png, maxSize, &nextBitmap);
+            nextBitmap = RenderMeshPreviewBitmap(meshGeometry_, maxSize);
+            if (nextBitmap) {
+                meshBitmapSize_ = maxSize;
+            }
+        } else {
+            std::vector<uint8_t> png = metadata_.thumbnailBytes;
+            if (png.empty()) {
+                (void)LoadFallbackPng(g_module, png);
+            }
+            if (!png.empty()) {
+                (void)DecodePngToHBitmap(png, maxSize, &nextBitmap);
+            }
         }
         if (!nextBitmap) {
             return;
@@ -2306,21 +2436,39 @@ private:
         const int imageAvailableHeight = std::max(1, (contentHeight * 55) / 100 - imageTop);
         const int imageBottomGap = 3;
 
-        EnsurePreviewBitmap(static_cast<UINT>(std::min(imageAvailableWidth, imageAvailableHeight)));
+        const int imageSize = std::min(imageAvailableWidth, imageAvailableHeight);
+        const int detailsReserve = std::min(96, contentHeight / 3);
+        const int viewportSize = std::min({width, contentHeight - 1,
+            std::max(1, contentHeight - detailsReserve - imageBottomGap)});
+#if ASXP_INTERACTIVE_MESH_PREVIEW
+        const bool interactive = EnsureMeshViewport(static_cast<UINT>(std::max(1, viewportSize)));
+#else
+        constexpr bool interactive = false;
+#endif
+        if (!interactive) {
+            EnsurePreviewBitmap(static_cast<UINT>(imageSize));
+        }
 
         ShowWindow(hwndText_, SW_SHOWNA);
         ShowWindow(hwndFooter_, SW_SHOWNA);
 
         int renderW = imageAvailableWidth;
         int renderH = imageAvailableHeight;
-        if (bitmapPixelWidth_ > 0 && bitmapPixelHeight_ > 0) {
+        if (interactive) {
+            renderW = renderH = viewportSize;
+        } else if (bitmapPixelWidth_ > 0 && bitmapPixelHeight_ > 0) {
             renderW = std::min(imageAvailableWidth, bitmapPixelWidth_);
             renderH = std::min(imageAvailableHeight, bitmapPixelHeight_);
         }
 
         const int imageX = (width - renderW) / 2;
-        const int imageY = imageTop;
+        const int imageY = interactive ? 0 : imageTop;
         SetWindowPos(hwndImage_, nullptr, imageX, imageY, renderW, renderH, SWP_NOZORDER | SWP_SHOWWINDOW | SWP_NOACTIVATE);
+#if ASXP_INTERACTIVE_MESH_PREVIEW
+        if (interactive) {
+            SetWindowPos(hwndMeshViewport_, nullptr, 0, 0, renderW, renderH, SWP_NOZORDER | SWP_SHOWWINDOW | SWP_NOACTIVATE);
+        }
+#endif
 
         const int textTop = std::min(imageY + renderH + imageBottomGap, contentHeight - 1);
         const int textBottom = contentHeight;
@@ -2336,25 +2484,35 @@ private:
     HWND hwndText_ = nullptr;
     HWND hwndFooter_ = nullptr;
     RECT rect_ = {};
-    std::vector<uint8_t> fileBytes_;
+    size_t sourceFileSize_ = 0;
     ApiumMetadata metadata_;
     std::unique_ptr<std::remove_pointer_t<HBITMAP>, DeleteObjectDeleter> bitmap_;
     int bitmapPixelWidth_ = 0;
     int bitmapPixelHeight_ = 0;
+    UINT meshBitmapSize_ = 0;
     std::unique_ptr<std::remove_pointer_t<HFONT>, DeleteObjectDeleter> font_;
     std::unique_ptr<std::remove_pointer_t<HBRUSH>, DeleteObjectDeleter> backgroundBrush_;
     COLORREF backgroundColor_ = RGB(255, 255, 255);
+    std::optional<COLORREF> hostBackgroundColor_;
     COLORREF textColor_ = RGB(0, 0, 0);
+    std::optional<COLORREF> hostTextColor_;
     std::string previewRtf_;
     std::wstring previewText_;
     std::wstring hostProcessName_;
     std::wstring initPath_;
     std::wstring sourceFilePath_;
     MeshPreviewResult meshInfo_;
+    MeshPreviewGeometry meshGeometry_;
     bool richEditActive_ = true;
     bool knownMeshFile_ = false;
-    bool meshPreviewMode_ = false;
-    bool meshPreviewFailed_ = false;
+#if ASXP_INTERACTIVE_MESH_PREVIEW
+    std::unique_ptr<MeshViewport> meshViewport_;
+    HWND hwndMeshViewport_ = nullptr;
+    bool meshViewportFailed_ = false;
+    bool draggingMesh_ = false;
+    bool meshPresentRetryPending_ = false;
+    POINT lastMeshDrag_ = {};
+#endif
     ComPtr<IUnknown> site_;
 };
 
