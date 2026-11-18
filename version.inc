@@ -1,3 +1,3 @@
 set(ASXP_NAME "ApiumSlicer Explorer Preview")
 set(ASXP_AUTHOR "")
-set(ASXP_VERSION "1.2.0")
+set(ASXP_VERSION "1.3.0")
