@@ -5,9 +5,13 @@ Build the extension and optionally refresh local registration.
 Use -Register to build and register a private copy of the new DLL. Legacy locks
 on the build output are released first. Use -StopProcesses to release locks
 without registering.
-Only processes holding the target DLL are stopped; Explorer is restored if needed.
+Explorer is restored if it was stopped to release a DLL lock. Add
+-RestartExplorer to restart Explorer and its preview hosts in the current
+Windows session after successful registration.
 .EXAMPLE
 ./scripts/build.ps1 -Register
+.EXAMPLE
+./scripts/build.ps1 -Ninja -BuildDir build-gpu-ninja -Register -RestartExplorer
 .EXAMPLE
 ./scripts/build.ps1 -Ninja -Config Release
 .EXAMPLE
@@ -25,6 +29,7 @@ param(
     [switch]$Clean,
     [switch]$Ninja,
     [switch]$Register,
+    [switch]$RestartExplorer,
     [switch]$StopProcesses,
     [switch]$SoftStop,
 
@@ -34,7 +39,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$script:restartExplorer = $false
+$script:buildSessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId
+$script:explorerNeedsRestore = $false
 
 function Get-VsWherePath {
     $candidates = @()
@@ -243,13 +249,14 @@ function Stop-PidList {
         }
 
         try {
+            $restoreExplorer = $proc.ProcessName -eq "explorer" -and $proc.SessionId -eq $script:buildSessionId
             if ($SoftStop) {
                 Stop-Process -Id $pidValue -ErrorAction Stop
             }
             else {
                 Stop-Process -Id $pidValue -Force -ErrorAction Stop
             }
-            if ($proc.ProcessName -eq "explorer") { $script:restartExplorer = $true }
+            if ($restoreExplorer) { $script:explorerNeedsRestore = $true }
             Write-Host ("Stopped PID {0} ({1})" -f $proc.Id, $proc.ProcessName)
         }
         catch {
@@ -314,9 +321,32 @@ function Invoke-RegistrationScript {
     if ($LASTEXITCODE -ne 0) { throw "$Name failed with exit code $LASTEXITCODE." }
 }
 
+function Get-CurrentSessionProcess {
+    param([string]$Name)
+
+    Get-Process -Name $Name -ErrorAction SilentlyContinue | Where-Object SessionId -eq $script:buildSessionId
+}
+
+function Stop-ExplorerForRestart {
+    Write-Host "Restarting Explorer and preview hosts in the current Windows session."
+    $explorerProcesses = @(Get-CurrentSessionProcess -Name "explorer")
+    $previewProcesses = @(Get-CurrentSessionProcess -Name "prevhost")
+    $script:explorerNeedsRestore = $true
+    # Release cached preview handlers before restarting their caller.
+    foreach ($process in ($previewProcesses + $explorerProcesses)) {
+        try {
+            Stop-Process -InputObject $process -Force -ErrorAction Stop
+            Wait-Process -InputObject $process -Timeout 5 -ErrorAction Stop
+        }
+        catch {
+            if (-not $process.HasExited) { throw }
+        }
+    }
+}
+
 function Restore-Explorer {
-    if ($script:restartExplorer -and -not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) {
-        Start-Process -FilePath "explorer.exe" -WindowStyle Hidden | Out-Null
+    if ($script:explorerNeedsRestore -and -not (Get-CurrentSessionProcess -Name "explorer")) {
+        Start-Process -FilePath (Join-Path $env:SystemRoot "explorer.exe") -WindowStyle Hidden | Out-Null
     }
 }
 
@@ -326,6 +356,9 @@ if ($RemainingArgs -and $RemainingArgs.Count -gt 0) {
     if ($RemainingArgs -contains "--ninja") { $Ninja = $true }
 }
 if ($Ninja) { $Generator = "Ninja" }
+if ($RestartExplorer -and -not $Register) {
+    throw "-RestartExplorer requires -Register."
+}
 if ([string]::IsNullOrWhiteSpace($BuildDir)) {
     $BuildDir = if ($Generator -eq "Ninja") { "build-ninja" } else { "build" }
 }
@@ -367,6 +400,7 @@ try {
         $resolvedDll = (Resolve-Path -LiteralPath $dllPath).Path
         Invoke-RegistrationScript -Name "register.ps1" -Arguments @("-DllPath", $resolvedDll)
         Write-Host "Development registration completed."
+        if ($RestartExplorer) { Stop-ExplorerForRestart }
     }
 } finally {
     Restore-Explorer
